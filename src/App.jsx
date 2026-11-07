@@ -118,6 +118,10 @@ const formatSets = (val) => {
   return num.toFixed(1).replace('.', ',');
 };
 
+const formatAverage = (val) => {
+  return Number(val || 0).toFixed(1).replace('.', ',');
+};
+
 const formatDateFr = (isoString) => {
   try {
     const d = new Date(isoString);
@@ -144,15 +148,6 @@ function getStatusRank(player) {
   return 2;
 }
 
-/**
- * Détermine la stratégie de sélection selon le numéro de set et le score des sets précédents :
- * - Sets 1 et 2 : 'PRIORITY_1' (Équité + Niveau individuel)
- * - Dès le Set 3 :
- *   - 0-2 (ou mené 1-2 au Set 4) : 'STRONG_COMEBACK' (Composition forte pour renverser le match)
- *   - 2-0 : 'ROTATION_DEVELOPMENT' (Composition moins forte / rotation pour donner du temps de jeu)
- *   - 1-1 (ou 2-1 au Set 4) : 'BALANCED_PRIORITY_1' (Composition équilibrée appuyée sur Priorité 1)
- *   - Set 5 (2-2 Tie-Break) : 'TIE_BREAK_MAX' (Meilleure performance globale)
- */
 function getSelectionStrategy(setNumber, ourSets, theirSets) {
   if (setNumber === 5) return 'TIE_BREAK_MAX';
   if (setNumber <= 2) return 'PRIORITY_1';
@@ -175,15 +170,12 @@ function comparePlayersByStrategy(a, b, matchSetsMap, strategy) {
   const statusA = getStatusRank(a);
   const statusB = getStatusRank(b);
 
-  // Set 5 (Tie-break) : Priorité à la performance pure (Attaque + Défense), puis équité en cas d'égalité
   if (strategy === 'TIE_BREAK_MAX') {
     if (Math.abs(scoreB - scoreA) > 0.01) return scoreB - scoreA;
     if (statusA !== statusB) return statusA - statusB;
     return setsA - setsB;
   }
 
-  // Situation 0-2 (ou mené au Set 4) : Composition forte pour renverser le match
-  // On privilégie les meilleures notes (Attaque + Défense) tout en évitant d'exclure quelqu'un qui a 2 sets d'écart
   if (strategy === 'STRONG_COMEBACK') {
     if (Math.abs(setsA - setsB) >= 2) return setsA - setsB;
     if (Math.abs(scoreB - scoreA) > 0.01) return scoreB - scoreA;
@@ -192,15 +184,13 @@ function comparePlayersByStrategy(a, b, matchSetsMap, strategy) {
     return ratioA - ratioB;
   }
 
-  // Situation 2-0 : Composition moins forte / rotation pour répartir le temps de jeu
   if (strategy === 'ROTATION_DEVELOPMENT') {
     if (setsA !== setsB) return setsA - setsB;
     if (Math.abs(ratioA - ratioB) > 0.001) return ratioA - ratioB;
-    if (Math.abs(scoreA - scoreB) > 0.01) return scoreA - scoreB; // Donne leur chance aux notes plus modestes
+    if (Math.abs(scoreA - scoreB) > 0.01) return scoreA - scoreB;
     return statusB - statusA;
   }
 
-  // Priorité 1 standard (Sets 1 & 2) et Situation équilibrée (1-1)
   if (setsA !== setsB) return setsA - setsB;
   if (Math.abs(ratioA - ratioB) > 0.001) return ratioA - ratioB;
   if (statusA !== statusB) return statusA - statusB;
@@ -226,7 +216,6 @@ function isGroupCompatible(playersList) {
 // Détection automatique Balle de Set / Balle de Match (Balle de Match prioritaire)
 function getTeamPointAlert(teamScore, oppScore, teamSets, currentSet) {
   const target = currentSet === 5 ? 15 : 25;
-  // Si le set est déjà terminé (écart >= 2 et seuil atteint), ce n'est plus une balle de set
   if ((teamScore >= target || oppScore >= target) && Math.abs(teamScore - oppScore) >= 2) {
     return null;
   }
@@ -269,7 +258,6 @@ function generateOptimalLineup({
   } else if (lockedLiberoId) {
     selectedLibero = presentPlayers.find(p => p.id === lockedLiberoId) || null;
   } else if (presentPlayers.length >= 7) {
-    // Pour le Libéro, on privilégie l'équité et la note de défense
     const sortedForLibero = [...presentPlayers].sort((a, b) => {
       const setsA = Number(matchSetsMap[a.id] || 0);
       const setsB = Number(matchSetsMap[b.id] || 0);
@@ -281,7 +269,6 @@ function generateOptimalLineup({
                      null;
   }
 
-  // Règle stricte : un joueur désigné comme Libéro durant le match ne peut jamais occuper un poste sur le terrain
   const forbiddenOnCourtIds = new Set(designatedLiberoIds || []);
   if (selectedLibero) forbiddenOnCourtIds.add(selectedLibero.id);
 
@@ -291,7 +278,6 @@ function generateOptimalLineup({
     comparePlayersByStrategy(a, b, matchSetsMap, strategy)
   );
 
-  // Ligne avant : P4, P3, P2 | Ligne arrière : P5, P6, P1
   const requiredSlots = setterSystem === 1
     ? [
         { pos: 'P1', row: 'back', targetRole: 'Passeur', label: 'Passeur' },
@@ -339,7 +325,6 @@ function generateOptimalLineup({
       const tiers = ['Spécialiste', 'Polyvalent'];
       if (allowDepannage) tiers.push('Dépannage');
 
-      // Affinage léger avant/arrière selon note d'attaque (ligne avant) ou défense (ligne arrière) à priorité égale
       const slotCandidates = [...sortedCandidates].sort((a, b) => {
         const baseCmp = comparePlayersByStrategy(a, b, matchSetsMap, strategy);
         if (baseCmp !== 0) return baseCmp;
@@ -539,23 +524,25 @@ export default function VolleyManagerPro() {
     return presentPlayers.filter(p => p.gender === 'F').length;
   }, [presentPlayers]);
 
-  // Calculs dynamiques du niveau offensif (Ligne avant) et défensif (Ligne arrière) - hors Libéro
-  const courtTotals = useMemo(() => {
+  // MODIFICATION 1 : Calcul dynamique de la Moyenne offensive et de la Moyenne défensive des 6 joueurs sur le terrain (hors Libéro)
+  const courtAverages = useMemo(() => {
     if (!matchState.court || matchState.court.length === 0) {
-      return { frontAttack: 0, backDefense: 0 };
+      return { attackAvg: '0,0', defenseAvg: '0,0' };
     }
-    const frontPositions = ['P4', 'P3', 'P2'];
-    const backPositions = ['P5', 'P6', 'P1'];
+    const count = matchState.court.length; // Exclusivement les 6 joueurs sur le terrain (le Libéro n'est jamais dans matchState.court)
+    const totalAttack = matchState.court.reduce(
+      (sum, slot) => sum + Number(slot.player?.attackLevel ?? slot.player?.level ?? 0),
+      0
+    );
+    const totalDefense = matchState.court.reduce(
+      (sum, slot) => sum + Number(slot.player?.defenseLevel ?? slot.player?.level ?? 0),
+      0
+    );
 
-    const frontAttack = matchState.court
-      .filter(slot => frontPositions.includes(slot.pos))
-      .reduce((sum, slot) => sum + Number(slot.player?.attackLevel ?? slot.player?.level ?? 0), 0);
-
-    const backDefense = matchState.court
-      .filter(slot => backPositions.includes(slot.pos))
-      .reduce((sum, slot) => sum + Number(slot.player?.defenseLevel ?? slot.player?.level ?? 0), 0);
-
-    return { frontAttack, backDefense };
+    return {
+      attackAvg: formatAverage(totalAttack / count),
+      defenseAvg: formatAverage(totalDefense / count)
+    };
   }, [matchState.court]);
 
   // Statistiques globales de l'équipe calculées dynamiquement à partir des matchs enregistrés
@@ -604,7 +591,7 @@ export default function VolleyManagerPro() {
       showToast(`${formData.name} ajouté à l'effectif.`, 'success');
     }
 
-    // Répercuter immédiatement les nouvelles notes d'attaque/défense si un match est en cours
+    // Répercute immédiatement les nouvelles notes sur les joueurs du terrain pour actualiser les moyennes
     const mapUpdatedPlayer = (pl) => updatedPlayers.find(u => u.id === pl.id) || pl;
     setMatchState(prev => ({
       ...prev,
@@ -666,7 +653,6 @@ export default function VolleyManagerPro() {
     showToast('Nouvelle saison initialisée : historiques remis à zéro.', 'success');
   };
 
-  // Suppression d'un match enregistré avec recalcul intégral des statistiques individuelles et globales
   const handleConfirmDeleteMatch = () => {
     if (!matchToDelete) return;
     const remainingMatches = matchesHistory.filter(m => m.id !== matchToDelete.id);
@@ -767,7 +753,6 @@ export default function VolleyManagerPro() {
     );
   };
 
-  // Retirer le libéro en cours de match (il reste toutefois marqué comme ayant été Libéro pour ne pas contourner la règle de poste)
   const handleRemoveLibero = () => {
     if (!matchState.libero) return;
     const removedLibero = matchState.libero;
@@ -784,7 +769,6 @@ export default function VolleyManagerPro() {
     showToast(`${removedLibero.name} retiré du poste de Libéro.`, 'info');
   };
 
-  // Désigner un libéro en cours de match (uniquement parmi les joueurs qui ne sont JAMAIS entrés sur le terrain)
   const handleSelectMidMatchLibero = (candidatePlayer) => {
     const hasEnteredCourt = (matchState.enteredCourtIds || []).includes(candidatePlayer.id);
     if (hasEnteredCourt) {
@@ -827,7 +811,7 @@ export default function VolleyManagerPro() {
     ];
 
     setMatchState({ ...matchState, court: rotated });
-    showToast('Rotation effectuée (totaux avant/arrière mis à jour).', 'info');
+    showToast('Rotation horaire effectuée.', 'info');
   };
 
   const handlePlayerSlotTap = (zone, indexOrId) => {
@@ -864,7 +848,6 @@ export default function VolleyManagerPro() {
       return;
     }
 
-    // Interdiction absolue pour tout joueur désigné Libéro d'entrer sur les 6 postes du terrain
     const designatedLiberos = new Set(matchState.designatedLiberoIds || []);
     if (currentLibero) designatedLiberos.add(currentLibero.id);
 
@@ -911,7 +894,6 @@ export default function VolleyManagerPro() {
       }
     }
 
-    // Tout joueur présent sur le terrain est enregistré dans enteredCourtIds (inéligible Libéro pour la suite)
     const updatedEnteredCourtIds = Array.from(
       new Set([...(matchState.enteredCourtIds || []), ...nextCourt.map(c => c.player.id)])
     );
@@ -926,7 +908,6 @@ export default function VolleyManagerPro() {
     showToast(`Remplacement : ${pA.name} ⇄ ${pB.name}`, 'success');
   };
 
-  // Vérification réglementaire de fin de set : 25 pts (sets 1-4) ou 15 pts (set 5) + 2 points d'écart minimum
   const isSetScoreValidToFinish = () => {
     const target = matchState.currentSet === 5 ? 15 : 25;
     const { ourScore, theirScore } = matchState;
@@ -1158,7 +1139,6 @@ export default function VolleyManagerPro() {
         onDecrement: () => setMatchState({ ...matchState, theirScore: Math.max(0, matchState.theirScore - 1) })
       };
 
-  // Joueurs du banc éligibles pour devenir Libéro en cours de match (jamais entrés sur le terrain)
   const eligibleBenchForLibero = useMemo(() => {
     const enteredSet = new Set(matchState.enteredCourtIds || []);
     return matchState.bench.filter(p => !enteredSet.has(p.id));
@@ -1280,7 +1260,6 @@ export default function VolleyManagerPro() {
                               )}
                             </div>
 
-                            {/* Affichage indépendant des notes d'Attaque et de Défense */}
                             <div className="flex items-center gap-2 mt-1">
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-orange-500/15 text-orange-300 border border-orange-500/30">
                                 <Sword className="w-3 h-3" />
@@ -1559,7 +1538,7 @@ export default function VolleyManagerPro() {
                 </div>
               ) : (
                 <>
-                  {/* SCOREBOARD */}
+                  {/* MODIFICATION 2 : SCOREBOARD AGRANDI (TAILLE DES CHIFFRES DOUBLÉE x2) */}
                   <div className="bg-gradient-to-b from-slate-800/90 to-slate-900 border border-slate-700/80 rounded-2xl p-3.5 shadow-xl">
                     <div className="flex items-center justify-between mb-2 gap-1">
                       <span className="text-[11px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 flex items-center gap-1">
@@ -1613,55 +1592,62 @@ export default function VolleyManagerPro() {
                       </div>
                     )}
 
-                    <div className="grid grid-cols-7 items-center gap-2 my-1">
-                      <div className="col-span-3 bg-slate-950/70 border border-slate-800 rounded-xl p-2.5 text-center">
-                        <div className="text-xs font-bold text-slate-300 truncate">{leftSide.name}</div>
-                        <div className={`text-4xl font-black my-1 tabular-nums ${leftSide.colorClass}`}>
+                    {/* Grille optimisée avec chiffres du score doublés (text-[4.5rem] = 72px au lieu de 36px) */}
+                    <div className="grid grid-cols-11 items-center gap-1.5 my-1">
+                      <div className="col-span-5 bg-slate-950/80 border border-slate-800 rounded-2xl px-2 py-3 text-center flex flex-col justify-between overflow-hidden">
+                        <div className="text-xs font-bold text-slate-300 truncate px-1">{leftSide.name}</div>
+                        <div
+                          onClick={!matchFinished ? leftSide.onIncrement : undefined}
+                          className={`text-[4.5rem] leading-none font-black my-2.5 tabular-nums tracking-tight cursor-pointer select-none ${leftSide.colorClass}`}
+                        >
                           {leftSide.score}
                         </div>
                         <div className="flex justify-center gap-1.5 mt-1">
                           <button
                             onClick={leftSide.onDecrement}
                             disabled={matchFinished}
-                            className="w-9 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-sm active:scale-90 disabled:opacity-40"
+                            className="w-10 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-base active:scale-90 disabled:opacity-40"
                           >
                             -
                           </button>
                           <button
                             onClick={leftSide.onIncrement}
                             disabled={matchFinished}
-                            className={`flex-1 h-8 rounded-lg font-bold text-sm active:scale-95 disabled:opacity-40 ${leftSide.btnPlusClass}`}
+                            className={`flex-1 h-9 rounded-xl font-bold text-sm active:scale-95 disabled:opacity-40 ${leftSide.btnPlusClass}`}
                           >
                             +1
                           </button>
                         </div>
                       </div>
 
-                      <div className="col-span-1 flex flex-col items-center justify-center">
+                      <div className="col-span-1 flex flex-col items-center justify-center px-0.5">
                         <div className="text-[10px] uppercase text-slate-400 font-semibold">Sets</div>
-                        <div className="text-base font-black text-white my-0.5 tabular-nums whitespace-nowrap">
+                        <div className="text-sm font-black text-white my-1 tabular-nums whitespace-nowrap">
                           {leftSide.sets} - {rightSide.sets}
                         </div>
-                        <div className="text-[10px] text-slate-500 whitespace-nowrap">min {targetPoints}</div>
+                        <div className="text-[9px] text-slate-500 whitespace-nowrap">min {targetPoints}</div>
                       </div>
 
-                      <div className="col-span-3 bg-slate-950/70 border border-slate-800 rounded-xl p-2.5 text-center">
-                        <div className="text-xs font-bold text-slate-300 truncate">{rightSide.name}</div>
-                        <div className={`text-4xl font-black my-1 tabular-nums ${rightSide.colorClass}`}>
+                      <div className="col-span-5 bg-slate-950/80 border border-slate-800 rounded-2xl px-2 py-3 text-center flex flex-col justify-between overflow-hidden">
+                        <div className="text-xs font-bold text-slate-300 truncate px-1">{rightSide.name}</div>
+                        <div
+                          onClick={!matchFinished ? rightSide.onIncrement : undefined}
+                          className={`text-[4.5rem] leading-none font-black my-2.5 tabular-nums tracking-tight cursor-pointer select-none ${rightSide.colorClass}`}
+                        >
                           {rightSide.score}
                         </div>
                         <div className="flex justify-center gap-1.5 mt-1">
                           <button
                             onClick={rightSide.onDecrement}
                             disabled={matchFinished}
-                            className="w-9 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-sm active:scale-90 disabled:opacity-40"
+                            className="w-10 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-base active:scale-90 disabled:opacity-40"
                           >
                             -
                           </button>
                           <button
                             onClick={rightSide.onIncrement}
                             disabled={matchFinished}
-                            className={`flex-1 h-8 rounded-lg font-bold text-sm active:scale-95 disabled:opacity-40 ${rightSide.btnPlusClass}`}
+                            className={`flex-1 h-9 rounded-xl font-bold text-sm active:scale-95 disabled:opacity-40 ${rightSide.btnPlusClass}`}
                           >
                             +1
                           </button>
@@ -1759,7 +1745,7 @@ export default function VolleyManagerPro() {
                     )}
                   </div>
 
-                  {/* TERRAIN DE VOLLEY-BALL (Sans inscriptions superflues + Indicateurs Offensif / Défensif dynamiques) */}
+                  {/* TERRAIN DE VOLLEY-BALL AVEC MOYENNES OFFENSIVE & DÉFENSIVE SUR LES 6 JOUEURS */}
                   <div className="bg-slate-800/50 border border-slate-800 rounded-2xl p-3.5 space-y-3">
                     <div className="flex items-center justify-between">
                       <div>
@@ -1783,18 +1769,18 @@ export default function VolleyManagerPro() {
                     </div>
 
                     <div className="relative bg-gradient-to-b from-emerald-950/60 to-emerald-900/30 border-2 border-emerald-500/40 rounded-2xl p-3 space-y-3">
-                      {/* Indicateur dynamique A : Niveau offensif (somme des notes d'attaque des 3 joueurs avant) */}
-                      <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-slate-950/80 border border-orange-500/40">
+                      {/* MODIFICATION 1 - A : Moyenne offensive des 6 joueurs sur le terrain (hors Libéro) */}
+                      <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-slate-950/85 border border-orange-500/40">
                         <span className="text-[11px] font-bold text-orange-300 flex items-center gap-1.5">
                           <Sword className="w-3.5 h-3.5 text-orange-400" />
-                          <span>Niveau offensif</span>
+                          <span>Moyenne offensive (6 joueurs)</span>
                         </span>
                         <span className="text-xs font-black text-white bg-orange-500/20 px-2.5 py-0.5 rounded-lg border border-orange-500/40 tabular-nums">
-                          Total : {courtTotals.frontAttack} pts
+                          {courtAverages.attackAvg} / 5
                         </span>
                       </div>
 
-                      {/* 3 Joueurs de devant (sans étiquettes P4/P3/P2) */}
+                      {/* 3 Joueurs de devant */}
                       <div className="grid grid-cols-3 gap-2">
                         {['P4', 'P3', 'P2'].map(posCode => {
                           const idx = matchState.court.findIndex(c => c.pos === posCode);
@@ -1836,7 +1822,7 @@ export default function VolleyManagerPro() {
 
                       <div className="border-t border-emerald-500/30 my-1"></div>
 
-                      {/* 3 Joueurs de derrière (sans étiquettes P5/P6/P1) */}
+                      {/* 3 Joueurs de derrière */}
                       <div className="grid grid-cols-3 gap-2">
                         {['P5', 'P6', 'P1'].map(posCode => {
                           const idx = matchState.court.findIndex(c => c.pos === posCode);
@@ -1876,19 +1862,19 @@ export default function VolleyManagerPro() {
                         })}
                       </div>
 
-                      {/* Indicateur dynamique B : Niveau défensif (somme des notes de défense des 3 joueurs arrière) */}
-                      <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-slate-950/80 border border-emerald-500/40">
+                      {/* MODIFICATION 1 - B : Moyenne défensive des 6 joueurs sur le terrain (hors Libéro) */}
+                      <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-slate-950/85 border border-emerald-500/40">
                         <span className="text-[11px] font-bold text-emerald-300 flex items-center gap-1.5">
                           <Shield className="w-3.5 h-3.5 text-emerald-400" />
-                          <span>Niveau défensif</span>
+                          <span>Moyenne défensive (6 joueurs)</span>
                         </span>
                         <span className="text-xs font-black text-white bg-emerald-500/20 px-2.5 py-0.5 rounded-lg border border-emerald-500/40 tabular-nums">
-                          Total : {courtTotals.backDefense} pts
+                          {courtAverages.defenseAvg} / 5
                         </span>
                       </div>
                     </div>
 
-                    {/* SECTION LIBÉRO (Avec possibilité de désigner un Libéro en cours de match) */}
+                    {/* SECTION LIBÉRO */}
                     {matchState.libero ? (
                       <div className="p-3 rounded-xl border border-rose-500/40 bg-rose-950/20 flex items-center justify-between gap-2">
                         <div
@@ -1905,7 +1891,7 @@ export default function VolleyManagerPro() {
                               <span className="text-[10px] text-emerald-300 shrink-0">🛡️Déf {matchState.libero.defenseLevel}/5</span>
                             </div>
                             <div className="text-[10px] text-rose-300/90">
-                              {formatSets(matchState.matchSetsPlayed[matchState.libero.id] || 0)} set(s) • Non inclus dans le total terrain
+                              {formatSets(matchState.matchSetsPlayed[matchState.libero.id] || 0)} set(s) • Non inclus dans les moyennes terrain
                             </div>
                           </div>
                         </div>
@@ -2032,7 +2018,6 @@ export default function VolleyManagerPro() {
           {/* ONGLET 4 : STATISTIQUES & HISTORIQUE */}
           {activeTab === 'stats' && (
             <div className="space-y-4">
-              {/* Bilan global de l'équipe (dynamique selon les matchs enregistrés) */}
               <div className="bg-slate-800/50 border border-slate-800 rounded-2xl p-4 space-y-3">
                 <h2 className="text-sm font-bold text-white flex items-center gap-2">
                   <Trophy className="w-4 h-4 text-amber-400" />
@@ -2058,7 +2043,6 @@ export default function VolleyManagerPro() {
                 </div>
               </div>
 
-              {/* Historique des matchs avec action de suppression et confirmation */}
               <div className="bg-slate-800/50 border border-slate-800 rounded-2xl p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
@@ -2155,7 +2139,6 @@ export default function VolleyManagerPro() {
                 )}
               </div>
 
-              {/* Indicateur d'équité du match en cours */}
               <div className="bg-slate-800/50 border border-slate-800 rounded-2xl p-4 space-y-3">
                 <h2 className="text-sm font-bold text-white flex items-center gap-2">
                   <BarChart3 className="w-4 h-4 text-indigo-400" />
@@ -2205,7 +2188,6 @@ export default function VolleyManagerPro() {
                 </div>
               </div>
 
-              {/* Ordre de priorité de l'algorithme */}
               <div className="bg-slate-800/50 border border-slate-800 rounded-2xl p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
@@ -2307,17 +2289,17 @@ export default function VolleyManagerPro() {
           </div>
         </nav>
 
-        {/* SCOREBOARD EN MODE PAYSAGE PLEIN ÉCRAN (CORRIGÉ : SETS SUR UNE SEULE LIGNE + ALERTES) */}
+        {/* MODIFICATION 2 (SUITE) : SCOREBOARD EN MODE PAYSAGE PLEIN ÉCRAN AVEC CHIFFRES DOUBLÉS */}
         {isLandscapeFullscreen && (
-          <div className="fixed inset-0 z-50 bg-slate-950 text-white flex flex-col justify-between p-4 select-none overflow-hidden">
+          <div className="fixed inset-0 z-50 bg-slate-950 text-white flex flex-col justify-between p-3 sm:p-4 select-none overflow-hidden">
             <div
               className={
                 forceRotate90
-                  ? 'w-[100vh] h-[100vw] fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rotate-90 flex flex-col justify-between p-5 bg-slate-950'
+                  ? 'w-[100vh] h-[100vw] fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rotate-90 flex flex-col justify-between p-4 bg-slate-950'
                   : 'w-full h-full flex flex-col justify-between'
               }
             >
-              <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 gap-2">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2 gap-2 shrink-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="px-3 py-1 rounded-full bg-indigo-500/20 border border-indigo-500/40 text-indigo-300 font-bold text-xs whitespace-nowrap">
                     SET {matchState.currentSet} • Min. {targetPoints} pts
@@ -2363,10 +2345,9 @@ export default function VolleyManagerPro() {
                 </div>
               </div>
 
-              {/* Grille 12 colonnes : 5 (Gauche) + 2 (Centre élargi pour '1 - 0' sur une seule ligne) + 5 (Droite) */}
               <div className="flex-1 grid grid-cols-12 items-center gap-3 my-2 min-h-0">
-                <div className="col-span-5 h-full bg-slate-900/90 border-2 border-slate-800 rounded-3xl p-3.5 flex flex-col justify-between items-center">
-                  <div className="w-full flex items-center justify-between px-1 gap-2">
+                <div className="col-span-5 h-full bg-slate-900/90 border-2 border-slate-800 rounded-3xl p-3 flex flex-col justify-between items-center overflow-hidden">
+                  <div className="w-full flex items-center justify-between px-1 gap-2 shrink-0">
                     <span className="text-base sm:text-lg font-extrabold text-slate-200 truncate">{leftSide.name}</span>
                     {leftSide.alert && (
                       <span className={`px-2 py-0.5 rounded-lg text-[10px] font-black uppercase whitespace-nowrap animate-pulse border ${
@@ -2381,30 +2362,30 @@ export default function VolleyManagerPro() {
 
                   <div
                     onClick={!matchFinished ? leftSide.onIncrement : undefined}
-                    className={`text-6xl sm:text-7xl font-black tabular-nums cursor-pointer select-none my-auto ${leftSide.colorClass}`}
+                    className={`text-[7.5rem] sm:text-[9rem] leading-none font-black tabular-nums tracking-tight cursor-pointer select-none my-auto ${leftSide.colorClass}`}
                   >
                     {leftSide.score}
                   </div>
 
-                  <div className="w-full grid grid-cols-3 gap-2">
+                  <div className="w-full grid grid-cols-3 gap-2 shrink-0">
                     <button
                       onClick={leftSide.onDecrement}
                       disabled={matchFinished}
-                      className="col-span-1 py-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-black text-lg active:scale-95 disabled:opacity-40"
+                      className="col-span-1 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-black text-lg active:scale-95 disabled:opacity-40"
                     >
                       -1
                     </button>
                     <button
                       onClick={leftSide.onIncrement}
                       disabled={matchFinished}
-                      className={`col-span-2 py-3 rounded-2xl font-black text-lg active:scale-95 disabled:opacity-40 ${leftSide.btnPlusClass}`}
+                      className={`col-span-2 py-2.5 rounded-2xl font-black text-lg active:scale-95 disabled:opacity-40 ${leftSide.btnPlusClass}`}
                     >
                       +1 PT
                     </button>
                   </div>
                 </div>
 
-                {/* Colonne centrale garantie sur une seule ligne (whitespace-nowrap + col-span-2) */}
+                {/* Colonne centrale garantie sur une seule ligne */}
                 <div className="col-span-2 flex flex-col items-center justify-center gap-1.5 px-1">
                   <div className="text-[11px] font-bold uppercase text-slate-400 tracking-wider">SETS</div>
                   <div className="px-2.5 py-1.5 rounded-2xl bg-slate-900 border border-slate-700 text-xl sm:text-2xl font-black text-white tabular-nums whitespace-nowrap shrink-0">
@@ -2424,8 +2405,8 @@ export default function VolleyManagerPro() {
                   )}
                 </div>
 
-                <div className="col-span-5 h-full bg-slate-900/90 border-2 border-slate-800 rounded-3xl p-3.5 flex flex-col justify-between items-center">
-                  <div className="w-full flex items-center justify-between px-1 gap-2">
+                <div className="col-span-5 h-full bg-slate-900/90 border-2 border-slate-800 rounded-3xl p-3 flex flex-col justify-between items-center overflow-hidden">
+                  <div className="w-full flex items-center justify-between px-1 gap-2 shrink-0">
                     <span className="text-base sm:text-lg font-extrabold text-slate-200 truncate">{rightSide.name}</span>
                     {rightSide.alert && (
                       <span className={`px-2 py-0.5 rounded-lg text-[10px] font-black uppercase whitespace-nowrap animate-pulse border ${
@@ -2440,23 +2421,23 @@ export default function VolleyManagerPro() {
 
                   <div
                     onClick={!matchFinished ? rightSide.onIncrement : undefined}
-                    className={`text-6xl sm:text-7xl font-black tabular-nums cursor-pointer select-none my-auto ${rightSide.colorClass}`}
+                    className={`text-[7.5rem] sm:text-[9rem] leading-none font-black tabular-nums tracking-tight cursor-pointer select-none my-auto ${rightSide.colorClass}`}
                   >
                     {rightSide.score}
                   </div>
 
-                  <div className="w-full grid grid-cols-3 gap-2">
+                  <div className="w-full grid grid-cols-3 gap-2 shrink-0">
                     <button
                       onClick={rightSide.onDecrement}
                       disabled={matchFinished}
-                      className="col-span-1 py-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-black text-lg active:scale-95 disabled:opacity-40"
+                      className="col-span-1 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-black text-lg active:scale-95 disabled:opacity-40"
                     >
                       -1
                     </button>
                     <button
                       onClick={rightSide.onIncrement}
                       disabled={matchFinished}
-                      className={`col-span-2 py-3 rounded-2xl font-black text-lg active:scale-95 disabled:opacity-40 ${rightSide.btnPlusClass}`}
+                      className={`col-span-2 py-2.5 rounded-2xl font-black text-lg active:scale-95 disabled:opacity-40 ${rightSide.btnPlusClass}`}
                     >
                       +1 PT
                     </button>
@@ -2568,7 +2549,7 @@ export default function VolleyManagerPro() {
           </div>
         )}
 
-        {/* MODALE : FORMULAIRE JOUEUR (AVEC NOTE D'ATTAQUE ET NOTE DE DÉFENSE) */}
+        {/* MODALE : FORMULAIRE JOUEUR */}
         {playerModalOpen && (
           <PlayerFormModal
             player={editingPlayer}
@@ -2783,7 +2764,6 @@ function PlayerFormModal({ player, allPlayers, onClose, onSave }) {
           </div>
         </div>
 
-        {/* Note d'Attaque indépendante */}
         <div>
           <label className="text-[11px] text-slate-400 flex items-center gap-1.5 mb-1">
             <Sword className="w-3.5 h-3.5 text-orange-400" />
@@ -2807,7 +2787,6 @@ function PlayerFormModal({ player, allPlayers, onClose, onSave }) {
           </div>
         </div>
 
-        {/* Note de Défense indépendante */}
         <div>
           <label className="text-[11px] text-slate-400 flex items-center gap-1.5 mb-1">
             <Shield className="w-3.5 h-3.5 text-emerald-400" />
