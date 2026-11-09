@@ -524,12 +524,12 @@ export default function VolleyManagerPro() {
     return presentPlayers.filter(p => p.gender === 'F').length;
   }, [presentPlayers]);
 
-  // MODIFICATION 1 : Calcul dynamique de la Moyenne offensive et de la Moyenne défensive des 6 joueurs sur le terrain (hors Libéro)
+  // Calcul dynamique de la Moyenne offensive et de la Moyenne défensive des 6 joueurs sur le terrain (hors Libéro)
   const courtAverages = useMemo(() => {
     if (!matchState.court || matchState.court.length === 0) {
       return { attackAvg: '0,0', defenseAvg: '0,0' };
     }
-    const count = matchState.court.length; // Exclusivement les 6 joueurs sur le terrain (le Libéro n'est jamais dans matchState.court)
+    const count = matchState.court.length;
     const totalAttack = matchState.court.reduce(
       (sum, slot) => sum + Number(slot.player?.attackLevel ?? slot.player?.level ?? 0),
       0
@@ -591,7 +591,6 @@ export default function VolleyManagerPro() {
       showToast(`${formData.name} ajouté à l'effectif.`, 'success');
     }
 
-    // Répercute immédiatement les nouvelles notes sur les joueurs du terrain pour actualiser les moyennes
     const mapUpdatedPlayer = (pl) => updatedPlayers.find(u => u.id === pl.id) || pl;
     setMatchState(prev => ({
       ...prev,
@@ -1538,7 +1537,7 @@ export default function VolleyManagerPro() {
                 </div>
               ) : (
                 <>
-                  {/* MODIFICATION 2 : SCOREBOARD AGRANDI (TAILLE DES CHIFFRES DOUBLÉE x2) */}
+                  {/* SCOREBOARD AGRANDI */}
                   <div className="bg-gradient-to-b from-slate-800/90 to-slate-900 border border-slate-700/80 rounded-2xl p-3.5 shadow-xl">
                     <div className="flex items-center justify-between mb-2 gap-1">
                       <span className="text-[11px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 flex items-center gap-1">
@@ -1592,7 +1591,6 @@ export default function VolleyManagerPro() {
                       </div>
                     )}
 
-                    {/* Grille optimisée avec chiffres du score doublés (text-[4.5rem] = 72px au lieu de 36px) */}
                     <div className="grid grid-cols-11 items-center gap-1.5 my-1">
                       <div className="col-span-5 bg-slate-950/80 border border-slate-800 rounded-2xl px-2 py-3 text-center flex flex-col justify-between overflow-hidden">
                         <div className="text-xs font-bold text-slate-300 truncate px-1">{leftSide.name}</div>
@@ -1745,7 +1743,7 @@ export default function VolleyManagerPro() {
                     )}
                   </div>
 
-                  {/* TERRAIN DE VOLLEY-BALL AVEC MOYENNES OFFENSIVE & DÉFENSIVE SUR LES 6 JOUEURS */}
+                  {/* TERRAIN DE VOLLEY-BALL AVEC EFFET MIROIR HORIZONTAL SUR LES DEUX LIGNES */}
                   <div className="bg-slate-800/50 border border-slate-800 rounded-2xl p-3.5 space-y-3">
                     <div className="flex items-center justify-between">
                       <div>
@@ -1769,7 +1767,7 @@ export default function VolleyManagerPro() {
                     </div>
 
                     <div className="relative bg-gradient-to-b from-emerald-950/60 to-emerald-900/30 border-2 border-emerald-500/40 rounded-2xl p-3 space-y-3">
-                      {/* MODIFICATION 1 - A : Moyenne offensive des 6 joueurs sur le terrain (hors Libéro) */}
+                      {/* Moyenne offensive des 6 joueurs sur le terrain (hors Libéro) */}
                       <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-slate-950/85 border border-orange-500/40">
                         <span className="text-[11px] font-bold text-orange-300 flex items-center gap-1.5">
                           <Sword className="w-3.5 h-3.5 text-orange-400" />
@@ -1780,9 +1778,9 @@ export default function VolleyManagerPro() {
                         </span>
                       </div>
 
-                      {/* 3 Joueurs de devant */}
+                      {/* 1re ligne (Ligne avant) inversée de gauche à droite : R4 (P2), Central (P3), Passeur/Pointu (P4) */}
                       <div className="grid grid-cols-3 gap-2">
-                        {['P4', 'P3', 'P2'].map(posCode => {
+                        {['P2', 'P3', 'P4'].map(posCode => {
                           const idx = matchState.court.findIndex(c => c.pos === posCode);
                           const slot = matchState.court[idx];
                           if (!slot) return null;
@@ -1822,9 +1820,9 @@ export default function VolleyManagerPro() {
 
                       <div className="border-t border-emerald-500/30 my-1"></div>
 
-                      {/* 3 Joueurs de derrière */}
+                      {/* 2e ligne (Ligne arrière) inversée de gauche à droite : Passeur (P1), Central (P6), R4 (P5) */}
                       <div className="grid grid-cols-3 gap-2">
-                        {['P5', 'P6', 'P1'].map(posCode => {
+                        {['P1', 'P6', 'P5'].map(posCode => {
                           const idx = matchState.court.findIndex(c => c.pos === posCode);
                           const slot = matchState.court[idx];
                           if (!slot) return null;
@@ -1862,7 +1860,7 @@ export default function VolleyManagerPro() {
                         })}
                       </div>
 
-                      {/* MODIFICATION 1 - B : Moyenne défensive des 6 joueurs sur le terrain (hors Libéro) */}
+                      {/* Moyenne défensive des 6 joueurs sur le terrain (hors Libéro) */}
                       <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-slate-950/85 border border-emerald-500/40">
                         <span className="text-[11px] font-bold text-emerald-300 flex items-center gap-1.5">
                           <Shield className="w-3.5 h-3.5 text-emerald-400" />
@@ -2289,7 +2287,7 @@ export default function VolleyManagerPro() {
           </div>
         </nav>
 
-        {/* MODIFICATION 2 (SUITE) : SCOREBOARD EN MODE PAYSAGE PLEIN ÉCRAN AVEC CHIFFRES DOUBLÉS */}
+        {/* SCOREBOARD EN MODE PAYSAGE PLEIN ÉCRAN */}
         {isLandscapeFullscreen && (
           <div className="fixed inset-0 z-50 bg-slate-950 text-white flex flex-col justify-between p-3 sm:p-4 select-none overflow-hidden">
             <div
