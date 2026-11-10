@@ -8,16 +8,56 @@ import {
   Maximize2, Minimize2, Calendar, Clock, Sword, Shield, Zap, UserPlus
 } from 'lucide-react';
 
+// ============================================================================
+// 1. CONSTANTES & CONFIGURATION TACTIQUE DE RÉFÉRENCE
+// ============================================================================
+
 const ROLES = ['Passeur', 'R4', 'Central', 'Pointu', 'Libéro', 'Polyvalent'];
 
 const ROLE_COLORS = {
-  'Passeur': 'bg-amber-500/20 text-amber-300 border-amber-500/40',
-  'R4': 'bg-blue-500/20 text-blue-300 border-blue-500/40',
-  'Central': 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
-  'Pointu': 'bg-purple-500/20 text-purple-300 border-purple-500/40',
-  'Libéro': 'bg-rose-500/20 text-rose-300 border-rose-500/40',
-  'Polyvalent': 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40',
+  Passeur: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+  R4: 'bg-blue-500/20 text-blue-300 border-blue-500/40',
+  Central: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+  Pointu: 'bg-purple-500/20 text-purple-300 border-purple-500/40',
+  Libéro: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
+  Polyvalent: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40',
 };
+
+/**
+ * Disposition impérative sur le terrain (de gauche à droite) :
+ * - Ligne avant (1re ligne) : P4 (1. Central), P3 (2. R4), P2 (3. Passeur)
+ * - Ligne arrière (2e ligne) : P5 (1. Passeur / Pointu), P6 (2. R4), P1 (3. Central)
+ * Cycle de rotation horaire autour du terrain : P4 -> P3 -> P2 -> P1 -> P6 -> P5 -> P4
+ */
+const FRONT_ROW_POSITIONS = ['P4', 'P3', 'P2'];
+const BACK_ROW_POSITIONS = ['P5', 'P6', 'P1'];
+
+const ROTATION_RECEIVE_FROM = {
+  P3: 'P4', // Avant Centre reçoit Avant Gauche
+  P2: 'P3', // Avant Droite reçoit Avant Centre
+  P1: 'P2', // Arrière Droite reçoit Avant Droite
+  P6: 'P1', // Arrière Centre reçoit Arrière Droite
+  P5: 'P6', // Arrière Gauche reçoit Arrière Centre
+  P4: 'P5', // Avant Gauche reçoit Arrière Gauche
+};
+
+function getRequiredSlots(setterSystem = 1) {
+  return [
+    // Ligne avant (de gauche à droite : Central, R4, Passeur)
+    { pos: 'P4', row: 'front', targetRole: 'Central', label: 'Central' },
+    { pos: 'P3', row: 'front', targetRole: 'R4', label: 'R4' },
+    { pos: 'P2', row: 'front', targetRole: 'Passeur', label: 'Passeur' },
+    // Ligne arrière (de gauche à droite : Passeur [ou Pointu en 1P], R4, Central)
+    {
+      pos: 'P5',
+      row: 'back',
+      targetRole: setterSystem === 1 ? 'Pointu' : 'Passeur',
+      label: setterSystem === 1 ? 'Pointu' : 'Passeur'
+    },
+    { pos: 'P6', row: 'back', targetRole: 'R4', label: 'R4' },
+    { pos: 'P1', row: 'back', targetRole: 'Central', label: 'Central' },
+  ];
+}
 
 const DEFAULT_MATCH_HISTORY = [
   {
@@ -72,21 +112,41 @@ const DEFAULT_ROSTER = [
   { id: 'p10', name: 'Léa', gender: 'F', attackLevel: 2, defenseLevel: 5, level: 3.5, roles: ['Libéro', 'R4'], isTitulaire: true, isCorpo: false, incompatibilities: [], historyMatches: 2, historySets: 3.5 },
 ];
 
-// Migration sans perte des joueurs existants (note globale -> attaque & défense)
+// ============================================================================
+// 2. FONCTIONS UTILITAIRES & CALCULS MÉTIER
+// ============================================================================
+
+const formatSets = (val) => {
+  const num = Number(val || 0);
+  return Number.isInteger(num) ? num.toString() : num.toFixed(1).replace('.', ',');
+};
+
+const formatAverage = (val) => Number(val || 0).toFixed(1).replace('.', ',');
+
+const formatDateFr = (isoString) => {
+  try {
+    return new Date(isoString).toLocaleDateString('fr-FR', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric'
+    });
+  } catch {
+    return isoString;
+  }
+};
+
 function migratePlayer(p) {
   const legacyLevel = Number(p.level || 3);
   const attackLevel = p.attackLevel !== undefined ? Number(p.attackLevel) : legacyLevel;
   const defenseLevel = p.defenseLevel !== undefined ? Number(p.defenseLevel) : legacyLevel;
-  const combined = Number(((attackLevel + defenseLevel) / 2).toFixed(1));
   return {
     ...p,
     attackLevel,
     defenseLevel,
-    level: combined
+    level: Number(((attackLevel + defenseLevel) / 2).toFixed(1))
   };
 }
 
-// Recalcul intégral des statistiques des joueurs à partir des matchs enregistrés (sans données fantômes)
 function recalculatePlayersStatsFromMatches(playersList, matchesList) {
   const matchesCountMap = {};
   const setsCountMap = {};
@@ -112,25 +172,6 @@ function recalculatePlayersStatsFromMatches(playersList, matchesList) {
   }));
 }
 
-const formatSets = (val) => {
-  const num = Number(val || 0);
-  if (Number.isInteger(num)) return num.toString();
-  return num.toFixed(1).replace('.', ',');
-};
-
-const formatAverage = (val) => {
-  return Number(val || 0).toFixed(1).replace('.', ',');
-};
-
-const formatDateFr = (isoString) => {
-  try {
-    const d = new Date(isoString);
-    return d.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' });
-  } catch {
-    return isoString;
-  }
-};
-
 function getPlayerOverallScore(player) {
   const att = Number(player.attackLevel ?? player.level ?? 3);
   const def = Number(player.defenseLevel ?? player.level ?? 3);
@@ -148,14 +189,43 @@ function getStatusRank(player) {
   return 2;
 }
 
+function areCompatible(player1, player2) {
+  if (!player1 || !player2) return true;
+  const inc1 = player1.incompatibilities || [];
+  const inc2 = player2.incompatibilities || [];
+  return !inc1.includes(player2.id) && !inc2.includes(player1.id);
+}
+
+function isGroupCompatible(playersList) {
+  for (let i = 0; i < playersList.length; i++) {
+    for (let j = i + 1; j < playersList.length; j++) {
+      if (!areCompatible(playersList[i], playersList[j])) return false;
+    }
+  }
+  return true;
+}
+
+function getTeamPointAlert(teamScore, oppScore, teamSets, currentSet) {
+  const target = currentSet === 5 ? 15 : 25;
+  if ((teamScore >= target || oppScore >= target) && Math.abs(teamScore - oppScore) >= 2) {
+    return null;
+  }
+  const nextPoint = teamScore + 1;
+  if (nextPoint >= target && (nextPoint - oppScore) >= 2) {
+    return teamSets === 2 ? 'BALLE DE MATCH' : 'BALLE DE SET';
+  }
+  return null;
+}
+
+// ============================================================================
+// 3. MOTEUR ALGORITHMIQUE DE SÉLECTION & COMPOSITION
+// ============================================================================
+
 function getSelectionStrategy(setNumber, ourSets, theirSets) {
   if (setNumber === 5) return 'TIE_BREAK_MAX';
   if (setNumber <= 2) return 'PRIORITY_1';
-
   if (ourSets === 0 && theirSets === 2) return 'STRONG_COMEBACK';
   if (ourSets === 2 && theirSets === 0) return 'ROTATION_DEVELOPMENT';
-  if (ourSets === 1 && theirSets === 1) return 'BALANCED_PRIORITY_1';
-
   if (ourSets < theirSets) return 'STRONG_COMEBACK';
   return 'BALANCED_PRIORITY_1';
 }
@@ -197,34 +267,10 @@ function comparePlayersByStrategy(a, b, matchSetsMap, strategy) {
   return scoreB - scoreA;
 }
 
-function areCompatible(player1, player2) {
-  if (!player1 || !player2) return true;
-  const inc1 = player1.incompatibilities || [];
-  const inc2 = player2.incompatibilities || [];
-  return !inc1.includes(player2.id) && !inc2.includes(player1.id);
-}
-
-function isGroupCompatible(playersList) {
-  for (let i = 0; i < playersList.length; i++) {
-    for (let j = i + 1; j < playersList.length; j++) {
-      if (!areCompatible(playersList[i], playersList[j])) return false;
-    }
-  }
-  return true;
-}
-
-// Détection automatique Balle de Set / Balle de Match (Balle de Match prioritaire)
-function getTeamPointAlert(teamScore, oppScore, teamSets, currentSet) {
-  const target = currentSet === 5 ? 15 : 25;
-  if ((teamScore >= target || oppScore >= target) && Math.abs(teamScore - oppScore) >= 2) {
-    return null;
-  }
-  const nextPoint = teamScore + 1;
-  if (nextPoint >= target && (nextPoint - oppScore) >= 2) {
-    if (teamSets === 2) return 'BALLE DE MATCH';
-    return 'BALLE DE SET';
-  }
-  return null;
+function getPlayerMatchTypeForRole(player, role) {
+  if (player.roles.includes(role)) return 'Spécialiste';
+  if (player.roles.includes('Polyvalent')) return 'Polyvalent';
+  return 'Manuel';
 }
 
 function generateOptimalLineup({
@@ -253,51 +299,30 @@ function generateOptimalLineup({
   }
 
   let selectedLibero = null;
-  if (lockedLiberoId === 'NONE') {
-    selectedLibero = null;
-  } else if (lockedLiberoId) {
+  if (lockedLiberoId && lockedLiberoId !== 'NONE') {
     selectedLibero = presentPlayers.find(p => p.id === lockedLiberoId) || null;
-  } else if (presentPlayers.length >= 7) {
+  } else if (!lockedLiberoId && presentPlayers.length >= 7) {
     const sortedForLibero = [...presentPlayers].sort((a, b) => {
-      const setsA = Number(matchSetsMap[a.id] || 0);
-      const setsB = Number(matchSetsMap[b.id] || 0);
-      if (setsA !== setsB) return setsA - setsB;
+      const setsDiff = Number(matchSetsMap[a.id] || 0) - Number(matchSetsMap[b.id] || 0);
+      if (setsDiff !== 0) return setsDiff;
       return (b.defenseLevel || 3) - (a.defenseLevel || 3);
     });
-    selectedLibero = sortedForLibero.find(p => p.roles.includes('Libéro')) ||
-                     sortedForLibero.find(p => p.roles.includes('Polyvalent')) ||
-                     null;
+    selectedLibero =
+      sortedForLibero.find(p => p.roles.includes('Libéro')) ||
+      sortedForLibero.find(p => p.roles.includes('Polyvalent')) ||
+      null;
   }
 
-  const forbiddenOnCourtIds = new Set(designatedLiberoIds || []);
+  const forbiddenOnCourtIds = new Set(designatedLiberoIds);
   if (selectedLibero) forbiddenOnCourtIds.add(selectedLibero.id);
 
   const candidateCourtPlayers = presentPlayers.filter(p => !forbiddenOnCourtIds.has(p.id));
-
   const sortedCandidates = [...candidateCourtPlayers].sort((a, b) =>
     comparePlayersByStrategy(a, b, matchSetsMap, strategy)
   );
 
-  const requiredSlots = setterSystem === 1
-    ? [
-        { pos: 'P1', row: 'back', targetRole: 'Passeur', label: 'Passeur' },
-        { pos: 'P2', row: 'front', targetRole: 'R4', label: 'R4' },
-        { pos: 'P3', row: 'front', targetRole: 'Central', label: 'Central' },
-        { pos: 'P4', row: 'front', targetRole: 'Pointu', label: 'Pointu' },
-        { pos: 'P5', row: 'back', targetRole: 'R4', label: 'R4' },
-        { pos: 'P6', row: 'back', targetRole: 'Central', label: 'Central' },
-      ]
-    : [
-        { pos: 'P1', row: 'back', targetRole: 'Passeur', label: 'Passeur' },
-        { pos: 'P2', row: 'front', targetRole: 'R4', label: 'R4' },
-        { pos: 'P3', row: 'front', targetRole: 'Central', label: 'Central' },
-        { pos: 'P4', row: 'front', targetRole: 'Passeur', label: 'Passeur' },
-        { pos: 'P5', row: 'back', targetRole: 'R4', label: 'R4' },
-        { pos: 'P6', row: 'back', targetRole: 'Central', label: 'Central' },
-      ];
-
-  const hasFemalesPresent = candidateCourtPlayers.some(p => p.gender === 'F');
-  const requireFemaleOnCourt = mode === 'Loisir' && hasFemalesPresent;
+  const requiredSlots = getRequiredSlots(setterSystem);
+  const requireFemaleOnCourt = mode === 'Loisir' && candidateCourtPlayers.some(p => p.gender === 'F');
 
   function canPlayRole(player, role, allowFallback = false) {
     if (player.roles.includes(role)) return { ok: true, matchType: 'Spécialiste' };
@@ -313,8 +338,7 @@ function generateOptimalLineup({
       if (bestSolution) return;
 
       if (slotIdx === requiredSlots.length) {
-        const chosenPlayers = currentAssignments.map(a => a.player);
-        if (requireFemaleOnCourt && !chosenPlayers.some(p => p.gender === 'F')) {
+        if (requireFemaleOnCourt && !currentAssignments.some(a => a.player.gender === 'F')) {
           return;
         }
         bestSolution = currentAssignments;
@@ -322,14 +346,14 @@ function generateOptimalLineup({
       }
 
       const slot = requiredSlots[slotIdx];
-      const tiers = ['Spécialiste', 'Polyvalent'];
-      if (allowDepannage) tiers.push('Dépannage');
+      const tiers = allowDepannage ? ['Spécialiste', 'Polyvalent', 'Dépannage'] : ['Spécialiste', 'Polyvalent'];
 
       const slotCandidates = [...sortedCandidates].sort((a, b) => {
         const baseCmp = comparePlayersByStrategy(a, b, matchSetsMap, strategy);
         if (baseCmp !== 0) return baseCmp;
-        if (slot.row === 'front') return (b.attackLevel || 3) - (a.attackLevel || 3);
-        return (b.defenseLevel || 3) - (a.defenseLevel || 3);
+        return slot.row === 'front'
+          ? (b.attackLevel || 3) - (a.attackLevel || 3)
+          : (b.defenseLevel || 3) - (a.defenseLevel || 3);
       });
 
       for (const tier of tiers) {
@@ -339,16 +363,11 @@ function generateOptimalLineup({
           const roleCheck = canPlayRole(candidate, slot.targetRole, allowDepannage);
           if (!roleCheck.ok || roleCheck.matchType !== tier) continue;
 
-          const compatibleWithCourt = currentAssignments.every(a => areCompatible(a.player, candidate));
-          if (!compatibleWithCourt) continue;
+          if (!currentAssignments.every(a => areCompatible(a.player, candidate))) continue;
           if (selectedLibero && !areCompatible(selectedLibero, candidate)) continue;
 
           usedIds.add(candidate.id);
-          currentAssignments.push({
-            ...slot,
-            player: candidate,
-            matchType: tier
-          });
+          currentAssignments.push({ ...slot, player: candidate, matchType: tier });
 
           backtrack(slotIdx + 1, currentAssignments, usedIds);
           if (bestSolution) return;
@@ -367,42 +386,34 @@ function generateOptimalLineup({
   if (!solution) {
     solution = solveSlots(true);
     if (solution) {
-      warnings.push("Certains postes ont été attribués en dépannage (spécialistes ou polyvalents indisponibles).");
+      warnings.push('Certains postes ont été attribués en dépannage (spécialistes ou polyvalents indisponibles).');
     }
   }
 
   if (!solution) {
-    warnings.push("Contraintes strictes impossibles à satisfaire simultanément. Proposition de la meilleure équipe disponible.");
-    const fallbackCourt = [];
-    for (const candidate of sortedCandidates) {
-      if (fallbackCourt.length < 6) {
-        const slot = requiredSlots[fallbackCourt.length];
-        fallbackCourt.push({
-          ...slot,
-          player: candidate,
-          matchType: candidate.roles.includes(slot.targetRole) ? 'Spécialiste' : 'Adapté'
-        });
-      }
-    }
-    solution = fallbackCourt;
+    warnings.push('Contraintes strictes impossibles à satisfaire simultanément. Proposition de la meilleure équipe disponible.');
+    solution = sortedCandidates.slice(0, 6).map((candidate, idx) => {
+      const slot = requiredSlots[idx];
+      return {
+        ...slot,
+        player: candidate,
+        matchType: candidate.roles.includes(slot.targetRole) ? 'Spécialiste' : 'Adapté'
+      };
+    });
   }
 
-  const usedCourtIds = new Set(solution.map(s => s.player.id));
-  if (selectedLibero) usedCourtIds.add(selectedLibero.id);
+  const usedIds = new Set(solution.map(s => s.player.id));
+  if (selectedLibero) usedIds.add(selectedLibero.id);
+  const bench = presentPlayers.filter(p => !usedIds.has(p.id));
 
-  const bench = presentPlayers.filter(p => !usedCourtIds.has(p.id));
-
-  if (strategy === 'TIE_BREAK_MAX') {
-    explanations.push("Set 5 (Tie-Break 2-2) : Priorité aux meilleures notes d'Attaque et de Défense.");
-  } else if (strategy === 'STRONG_COMEBACK') {
-    explanations.push(`Set ${setNumber} (Score ${ourSets}-${theirSets}) — Priorité 2 : Composition forte alignée pour renverser le match.`);
-  } else if (strategy === 'ROTATION_DEVELOPMENT') {
-    explanations.push(`Set ${setNumber} (Score ${ourSets}-${theirSets}) — Priorité 2 : Rotation privilégiée pour répartir le temps de jeu.`);
-  } else if (strategy === 'BALANCED_PRIORITY_1') {
-    explanations.push(`Set ${setNumber} (Score ${ourSets}-${theirSets}) — Priorité 2 : Composition équilibrée basée sur la Priorité 1.`);
-  } else {
-    explanations.push(`Set ${setNumber} — Priorité 1 : Sélection selon l'équité, le ratio et le niveau individuel.`);
-  }
+  const strategyMessages = {
+    TIE_BREAK_MAX: "Set 5 (Tie-Break 2-2) : Priorité aux meilleures notes d'Attaque et de Défense.",
+    STRONG_COMEBACK: `Set ${setNumber} (Score ${ourSets}-${theirSets}) — Priorité 2 : Composition forte alignée pour renverser le match.`,
+    ROTATION_DEVELOPMENT: `Set ${setNumber} (Score ${ourSets}-${theirSets}) — Priorité 2 : Rotation privilégiée pour répartir le temps de jeu.`,
+    BALANCED_PRIORITY_1: `Set ${setNumber} (Score ${ourSets}-${theirSets}) — Priorité 2 : Composition équilibrée basée sur la Priorité 1.`,
+    PRIORITY_1: `Set ${setNumber} — Priorité 1 : Sélection selon l'équité, le ratio et le niveau individuel.`
+  };
+  explanations.push(strategyMessages[strategy]);
 
   if (selectedLibero) {
     explanations.push(`Libéro actif : ${selectedLibero.name} (Déf ★${selectedLibero.defenseLevel} • 0,5 set/set).`);
@@ -410,22 +421,59 @@ function generateOptimalLineup({
     explanations.push("Configuration sans Libéro (possibilité d'en désigner un en cours de match s'il n'est jamais entré).");
   }
 
-  return {
-    court: solution,
-    libero: selectedLibero,
-    bench,
-    warnings,
-    explanations,
-    strategy
-  };
+  return { court: solution, libero: selectedLibero, bench, warnings, explanations, strategy };
 }
+
+// ============================================================================
+// 4. SOUS-COMPOSANTS UI DÉCOUPLÉS
+// ============================================================================
+
+function CourtPlayerCard({ slot, idx, isSelected, setsToday, isFrontRow, onSelect }) {
+  if (!slot) return null;
+  return (
+    <div
+      onClick={() => onSelect('court', idx)}
+      className={`p-2.5 rounded-xl border text-center cursor-pointer transition relative ${
+        isSelected
+          ? 'bg-indigo-600/40 border-indigo-400 ring-2 ring-indigo-400 scale-[1.02]'
+          : 'bg-slate-900/85 border-slate-700/80 hover:border-emerald-500/50'
+      }`}
+    >
+      <div className="flex items-center justify-between text-[9px] text-slate-400 mb-1">
+        <span
+          className={`px-1.5 py-0.2 rounded font-bold ${
+            slot.player.gender === 'F' ? 'bg-pink-500/20 text-pink-300' : 'bg-sky-500/20 text-sky-300'
+          }`}
+        >
+          {slot.player.gender === 'F' ? 'F' : 'H'}
+        </span>
+        <span className={`${isFrontRow ? 'text-orange-300' : 'text-emerald-300'} font-bold`}>
+          ⚔️{slot.player.attackLevel} 🛡️{slot.player.defenseLevel}
+        </span>
+      </div>
+      <div className="font-bold text-xs text-white truncate">{slot.player.name}</div>
+      <div className="text-[10px] text-amber-300/90 truncate mt-0.5">{slot.targetRole}</div>
+      <div className="text-[9px] text-slate-400 mt-1 flex items-center justify-between">
+        <span>{slot.matchType}</span>
+        <span className="text-indigo-300 font-semibold">{formatSets(setsToday)}s</span>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// 5. COMPOSANT PRINCIPAL : VOLLEY MANAGER PRO
+// ============================================================================
 
 export default function VolleyManagerPro() {
   const [activeTab, setActiveTab] = useState('roster');
 
   const [players, setPlayers] = useState(() => {
     try {
-      const saved = localStorage.getItem('vmp_players_v4') || localStorage.getItem('vmp_players_v3') || localStorage.getItem('vmp_players_v2');
+      const saved =
+        localStorage.getItem('vmp_players_v4') ||
+        localStorage.getItem('vmp_players_v3') ||
+        localStorage.getItem('vmp_players_v2');
       const parsed = saved ? JSON.parse(saved) : DEFAULT_ROSTER;
       return parsed.map(migratePlayer);
     } catch {
@@ -516,20 +564,21 @@ export default function VolleyManagerPro() {
     try { localStorage.setItem('vmp_active_match_v4', JSON.stringify(matchState)); } catch {}
   }, [matchState]);
 
-  const presentPlayers = useMemo(() => {
-    return players.filter(p => matchState.presentIds.includes(p.id));
-  }, [players, matchState.presentIds]);
+  const presentPlayers = useMemo(
+    () => players.filter(p => matchState.presentIds.includes(p.id)),
+    [players, matchState.presentIds]
+  );
 
-  const presentFemalesCount = useMemo(() => {
-    return presentPlayers.filter(p => p.gender === 'F').length;
-  }, [presentPlayers]);
+  const presentFemalesCount = useMemo(
+    () => presentPlayers.filter(p => p.gender === 'F').length,
+    [presentPlayers]
+  );
 
-  // Calcul dynamique de la Moyenne offensive et de la Moyenne défensive des 6 joueurs sur le terrain (hors Libéro)
+  // Moyennes offensive et défensive des 6 joueurs sur le terrain (hors Libéro)
   const courtAverages = useMemo(() => {
-    if (!matchState.court || matchState.court.length === 0) {
-      return { attackAvg: '0,0', defenseAvg: '0,0' };
-    }
-    const count = matchState.court.length;
+    const count = matchState.court?.length || 0;
+    if (count === 0) return { attackAvg: '0,0', defenseAvg: '0,0' };
+
     const totalAttack = matchState.court.reduce(
       (sum, slot) => sum + Number(slot.player?.attackLevel ?? slot.player?.level ?? 0),
       0
@@ -545,16 +594,19 @@ export default function VolleyManagerPro() {
     };
   }, [matchState.court]);
 
-  // Statistiques globales de l'équipe calculées dynamiquement à partir des matchs enregistrés
   const globalTeamStats = useMemo(() => {
     const totalMatches = matchesHistory.length;
     const wins = matchesHistory.filter(m => m.ourSets > m.theirSets).length;
     const losses = totalMatches - wins;
     const setsWon = matchesHistory.reduce((acc, m) => acc + Number(m.ourSets || 0), 0);
     const setsLost = matchesHistory.reduce((acc, m) => acc + Number(m.theirSets || 0), 0);
-    const winRate = totalMatches > 0 ? Math.round((wins / totalMatches) * 100) : 0;
-    return { totalMatches, wins, losses, setsWon, setsLost, winRate };
+    return { totalMatches, wins, losses, setsWon, setsLost };
   }, [matchesHistory]);
+
+  const eligibleBenchForLibero = useMemo(() => {
+    const enteredSet = new Set(matchState.enteredCourtIds || []);
+    return matchState.bench.filter(p => !enteredSet.has(p.id));
+  }, [matchState.bench, matchState.enteredCourtIds]);
 
   const handleSavePlayer = (formData) => {
     const combinedLevel = Number(((Number(formData.attackLevel) + Number(formData.defenseLevel)) / 2).toFixed(1));
@@ -563,9 +615,7 @@ export default function VolleyManagerPro() {
     let updatedPlayers;
     if (editingPlayer) {
       updatedPlayers = players.map(p => {
-        if (p.id === editingPlayer.id) {
-          return { ...p, ...enrichedData };
-        }
+        if (p.id === editingPlayer.id) return { ...p, ...enrichedData };
         const shouldBeIncompatible = formData.incompatibilities.includes(p.id);
         const currentInc = new Set(p.incompatibilities || []);
         if (shouldBeIncompatible) currentInc.add(editingPlayer.id);
@@ -575,18 +625,12 @@ export default function VolleyManagerPro() {
       showToast(`${formData.name} mis à jour (Att ★${formData.attackLevel} / Déf ★${formData.defenseLevel}).`, 'success');
     } else {
       const newId = 'p_' + Date.now();
-      const newPlayer = {
-        id: newId,
-        ...enrichedData,
-        historyMatches: 0,
-        historySets: 0
-      };
-      updatedPlayers = players.map(p => {
-        if (formData.incompatibilities.includes(p.id)) {
-          return { ...p, incompatibilities: [...(p.incompatibilities || []), newId] };
-        }
-        return p;
-      });
+      const newPlayer = { id: newId, ...enrichedData, historyMatches: 0, historySets: 0 };
+      updatedPlayers = players.map(p =>
+        formData.incompatibilities.includes(p.id)
+          ? { ...p, incompatibilities: [...(p.incompatibilities || []), newId] }
+          : p
+      );
       updatedPlayers.push(newPlayer);
       showToast(`${formData.name} ajouté à l'effectif.`, 'success');
     }
@@ -612,24 +656,23 @@ export default function VolleyManagerPro() {
         ...p,
         incompatibilities: (p.incompatibilities || []).filter(id => id !== playerId)
       }));
-    const updatedMatch = {
-      ...matchState,
-      presentIds: matchState.presentIds.filter(id => id !== playerId),
-      lockedLiberoId: matchState.lockedLiberoId === playerId ? null : matchState.lockedLiberoId
-    };
+
     setPlayers(updated);
-    setMatchState(updatedMatch);
+    setMatchState(prev => ({
+      ...prev,
+      presentIds: prev.presentIds.filter(id => id !== playerId),
+      bench: prev.bench.filter(p => p.id !== playerId),
+      libero: prev.libero?.id === playerId ? null : prev.libero,
+      lockedLiberoId: prev.lockedLiberoId === playerId ? 'NONE' : prev.lockedLiberoId
+    }));
     if (target) showToast(`${target.name} supprimé.`, 'info');
   };
 
   const handleResetSeason = () => {
-    const resetList = players.map(p => ({
-      ...p,
-      historyMatches: 0,
-      historySets: 0
-    }));
-    const resetMatch = {
-      ...matchState,
+    setPlayers(players.map(p => ({ ...p, historyMatches: 0, historySets: 0 })));
+    setMatchesHistory([]);
+    setMatchState(prev => ({
+      ...prev,
       isActive: false,
       currentSet: 1,
       ourScore: 0,
@@ -644,10 +687,7 @@ export default function VolleyManagerPro() {
       libero: null,
       bench: [],
       historyRecorded: false
-    };
-    setPlayers(resetList);
-    setMatchesHistory([]);
-    setMatchState(resetMatch);
+    }));
     setConfirmSeasonResetOpen(false);
     showToast('Nouvelle saison initialisée : historiques remis à zéro.', 'success');
   };
@@ -655,10 +695,8 @@ export default function VolleyManagerPro() {
   const handleConfirmDeleteMatch = () => {
     if (!matchToDelete) return;
     const remainingMatches = matchesHistory.filter(m => m.id !== matchToDelete.id);
-    const recalculatedPlayers = recalculatePlayersStatsFromMatches(players, remainingMatches);
-
     setMatchesHistory(remainingMatches);
-    setPlayers(recalculatedPlayers);
+    setPlayers(recalculatePlayersStatsFromMatches(players, remainingMatches));
     setMatchToDelete(null);
     showToast(`Match contre ${matchToDelete.opponentName} supprimé. Statistiques recalculées.`, 'success');
   };
@@ -693,9 +731,7 @@ export default function VolleyManagerPro() {
     matchState.presentIds.forEach(id => { initialSetsPlayed[id] = 0; });
 
     let effectiveLockedLiberoId = matchState.lockedLiberoId;
-    if (effectiveLockedLiberoId === 'NONE') {
-      effectiveLockedLiberoId = 'NONE';
-    } else if (effectiveLockedLiberoId && !matchState.presentIds.includes(effectiveLockedLiberoId)) {
+    if (effectiveLockedLiberoId && effectiveLockedLiberoId !== 'NONE' && !matchState.presentIds.includes(effectiveLockedLiberoId)) {
       effectiveLockedLiberoId = null;
     }
 
@@ -712,21 +748,14 @@ export default function VolleyManagerPro() {
     });
 
     const finalLockedLiberoId =
-      effectiveLockedLiberoId === 'NONE'
-        ? 'NONE'
-        : lineup.libero
-        ? lineup.libero.id
-        : 'NONE';
+      effectiveLockedLiberoId === 'NONE' ? 'NONE' : lineup.libero ? lineup.libero.id : 'NONE';
 
-    const initialEnteredCourtIds = lineup.court.map(c => c.player.id);
-    const initialDesignatedLiberoIds = lineup.libero ? [lineup.libero.id] : [];
-
-    const newMatchState = {
+    setMatchState({
       ...matchState,
       isActive: true,
       lockedLiberoId: finalLockedLiberoId,
-      enteredCourtIds: initialEnteredCourtIds,
-      designatedLiberoIds: initialDesignatedLiberoIds,
+      enteredCourtIds: lineup.court.map(c => c.player.id),
+      designatedLiberoIds: lineup.libero ? [lineup.libero.id] : [],
       currentSet: 1,
       ourScore: 0,
       theirScore: 0,
@@ -740,9 +769,8 @@ export default function VolleyManagerPro() {
       algorithmNotes: lineup.explanations,
       algorithmWarnings: lineup.warnings,
       historyRecorded: false
-    };
+    });
 
-    setMatchState(newMatchState);
     setActiveTab('live');
     showToast(
       lineup.libero
@@ -756,59 +784,63 @@ export default function VolleyManagerPro() {
     if (!matchState.libero) return;
     const removedLibero = matchState.libero;
     const alreadyOnBench = matchState.bench.some(p => p.id === removedLibero.id);
-    const updatedBench = alreadyOnBench ? matchState.bench : [...matchState.bench, removedLibero];
 
     setSwapSelection(null);
     setMatchState({
       ...matchState,
       libero: null,
       lockedLiberoId: 'NONE',
-      bench: updatedBench
+      bench: alreadyOnBench ? matchState.bench : [...matchState.bench, removedLibero]
     });
     showToast(`${removedLibero.name} retiré du poste de Libéro.`, 'info');
   };
 
   const handleSelectMidMatchLibero = (candidatePlayer) => {
-    const hasEnteredCourt = (matchState.enteredCourtIds || []).includes(candidatePlayer.id);
-    if (hasEnteredCourt) {
+    if ((matchState.enteredCourtIds || []).includes(candidatePlayer.id)) {
       showToast(`Impossible : ${candidatePlayer.name} est déjà entré sur le terrain durant ce match.`, 'error');
       return;
     }
 
     const courtPlayers = matchState.court.map(c => c.player);
     if (!isGroupCompatible([...courtPlayers, candidatePlayer])) {
-      showToast(`Impossible : incompatibilité détectée avec un joueur sur le terrain.`, 'error');
+      showToast('Impossible : incompatibilité détectée avec un joueur sur le terrain.', 'error');
       return;
     }
-
-    const nextBench = matchState.bench.filter(p => p.id !== candidatePlayer.id);
-    const nextDesignatedLiberoIds = Array.from(new Set([...(matchState.designatedLiberoIds || []), candidatePlayer.id]));
 
     setMatchState({
       ...matchState,
       libero: candidatePlayer,
       lockedLiberoId: candidatePlayer.id,
-      designatedLiberoIds: nextDesignatedLiberoIds,
-      bench: nextBench
+      designatedLiberoIds: Array.from(new Set([...(matchState.designatedLiberoIds || []), candidatePlayer.id])),
+      bench: matchState.bench.filter(p => p.id !== candidatePlayer.id)
     });
     setLiberoModalOpen(false);
     showToast(`${candidatePlayer.name} est désormais désigné Libéro pour le match !`, 'success');
   };
 
+  /**
+   * Rotation horaire sur le terrain :
+   * P4 (Av. Gauche) -> P3 (Av. Centre) -> P2 (Av. Droite) -> P1 (Arr. Droite) -> P6 (Arr. Centre) -> P5 (Arr. Gauche) -> P4
+   * Le joueur emporte avec lui son rôle (targetRole, label, matchType).
+   */
   const rotateCourtClockwise = () => {
     if (!matchState.court || matchState.court.length !== 6) return;
     const byPos = {};
     matchState.court.forEach(item => { byPos[item.pos] = item; });
 
-    const rotated = [
-      { ...byPos['P1'], player: byPos['P2'].player, matchType: byPos['P2'].matchType },
-      { ...byPos['P2'], player: byPos['P3'].player, matchType: byPos['P3'].matchType },
-      { ...byPos['P3'], player: byPos['P4'].player, matchType: byPos['P4'].matchType },
-      { ...byPos['P4'], player: byPos['P5'].player, matchType: byPos['P5'].matchType },
-      { ...byPos['P5'], player: byPos['P6'].player, matchType: byPos['P6'].matchType },
-      { ...byPos['P6'], player: byPos['P1'].player, matchType: byPos['P1'].matchType },
-    ];
+    const rotated = matchState.court.map(slot => {
+      const sourcePos = ROTATION_RECEIVE_FROM[slot.pos];
+      const incoming = byPos[sourcePos];
+      return {
+        ...slot,
+        targetRole: incoming.targetRole,
+        label: incoming.label,
+        player: incoming.player,
+        matchType: incoming.matchType
+      };
+    });
 
+    setSwapSelection(null);
     setMatchState({ ...matchState, court: rotated });
     showToast('Rotation horaire effectuée.', 'info');
   };
@@ -834,7 +866,7 @@ export default function VolleyManagerPro() {
     const currentLibero = matchState.libero;
 
     const getPlayerFromRef = (ref) => {
-      if (ref.zone === 'court') return nextCourt[ref.indexOrId].player;
+      if (ref.zone === 'court') return nextCourt[ref.indexOrId]?.player;
       if (ref.zone === 'bench') return nextBench.find(p => p.id === ref.indexOrId);
       return null;
     };
@@ -859,23 +891,41 @@ export default function VolleyManagerPro() {
       return;
     }
 
-    const assignPlayerToRef = (ref, newPlayer) => {
-      if (ref.zone === 'court') {
-        const slot = nextCourt[ref.indexOrId];
-        const isSpec = newPlayer.roles.includes(slot.targetRole);
-        const isPoly = newPlayer.roles.includes('Polyvalent');
-        nextCourt[ref.indexOrId] = {
-          ...slot,
-          player: newPlayer,
-          matchType: isSpec ? 'Spécialiste' : isPoly ? 'Polyvalent' : 'Manuel'
-        };
-      } else if (ref.zone === 'bench') {
-        nextBench = nextBench.map(p => (p.id === ref.indexOrId ? newPlayer : p));
-      }
-    };
-
-    assignPlayerToRef(swapSelection, pB);
-    assignPlayerToRef({ zone, indexOrId }, pA);
+    if (swapSelection.zone === 'court' && zone === 'court') {
+      // Échange de position entre 2 joueurs déjà sur le terrain : chacun conserve son poste
+      const slotA = nextCourt[swapSelection.indexOrId];
+      const slotB = nextCourt[indexOrId];
+      nextCourt[swapSelection.indexOrId] = {
+        ...slotA,
+        player: slotB.player,
+        targetRole: slotB.targetRole,
+        label: slotB.label,
+        matchType: slotB.matchType
+      };
+      nextCourt[indexOrId] = {
+        ...slotB,
+        player: slotA.player,
+        targetRole: slotA.targetRole,
+        label: slotA.label,
+        matchType: slotA.matchType
+      };
+    } else {
+      // Remplacement entre le terrain et le banc : le joueur entrant reprend le poste du joueur sortant
+      const assignPlayerToRef = (ref, newPlayer) => {
+        if (ref.zone === 'court') {
+          const slot = nextCourt[ref.indexOrId];
+          nextCourt[ref.indexOrId] = {
+            ...slot,
+            player: newPlayer,
+            matchType: getPlayerMatchTypeForRole(newPlayer, slot.targetRole)
+          };
+        } else if (ref.zone === 'bench') {
+          nextBench = nextBench.map(p => (p.id === ref.indexOrId ? newPlayer : p));
+        }
+      };
+      assignPlayerToRef(swapSelection, pB);
+      assignPlayerToRef({ zone, indexOrId }, pA);
+    }
 
     const activeGroup = [...nextCourt.map(c => c.player), ...(currentLibero ? [currentLibero] : [])];
     if (!isGroupCompatible(activeGroup)) {
@@ -884,13 +934,10 @@ export default function VolleyManagerPro() {
       return;
     }
 
-    if (matchState.mode === 'Loisir' && presentFemalesCount > 0) {
-      const hasFemaleOnCourt = nextCourt.some(c => c.player.gender === 'F');
-      if (!hasFemaleOnCourt) {
-        showToast('Échange refusé : au moins 1 femme doit rester sur le terrain en mode Loisir !', 'error');
-        setSwapSelection(null);
-        return;
-      }
+    if (matchState.mode === 'Loisir' && presentFemalesCount > 0 && !nextCourt.some(c => c.player.gender === 'F')) {
+      showToast('Échange refusé : au moins 1 femme doit rester sur le terrain en mode Loisir !', 'error');
+      setSwapSelection(null);
+      return;
     }
 
     const updatedEnteredCourtIds = Array.from(
@@ -907,32 +954,49 @@ export default function VolleyManagerPro() {
     showToast(`Remplacement : ${pA.name} ⇄ ${pB.name}`, 'success');
   };
 
+  const matchFinished = matchState.ourSets === 3 || matchState.theirSets === 3;
+  const targetPoints = matchState.currentSet === 5 ? 15 : 25;
+
   const isSetScoreValidToFinish = () => {
-    const target = matchState.currentSet === 5 ? 15 : 25;
     const { ourScore, theirScore } = matchState;
-    const maxScore = Math.max(ourScore, theirScore);
-    const diff = Math.abs(ourScore - theirScore);
-    return maxScore >= target && diff >= 2;
+    return Math.max(ourScore, theirScore) >= targetPoints && Math.abs(ourScore - theirScore) >= 2;
   };
 
   const applyScoreSuggestion = (leftVal, rightVal) => {
     if (matchFinished) return;
-    if (matchState.isScoreboardReversed) {
-      setMatchState({ ...matchState, theirScore: leftVal, ourScore: rightVal });
-    } else {
-      setMatchState({ ...matchState, ourScore: leftVal, theirScore: rightVal });
-    }
+    setMatchState(prev => ({
+      ...prev,
+      ourScore: prev.isScoreboardReversed ? rightVal : leftVal,
+      theirScore: prev.isScoreboardReversed ? leftVal : rightVal
+    }));
     showToast(`Score suggéré appliqué : ${leftVal} - ${rightVal}`, 'info');
   };
 
   const handleOpenValidateSetModal = () => {
     if (!isSetScoreValidToFinish()) {
-      const target = matchState.currentSet === 5 ? 15 : 25;
-      showToast(`Validation impossible : il faut au minimum ${target} points et 2 points d'écart.`, 'error');
+      showToast(`Validation impossible : il faut au minimum ${targetPoints} points et 2 points d'écart.`, 'error');
       return;
     }
     setPendingNextSetSystem(matchState.setterSystem);
     setNextSetModalOpen(true);
+  };
+
+  const recordMatchInHistory = (ourSetsFinal, theirSetsFinal, setsHistoryFinal, matchSetsPlayedFinal) => {
+    const newMatchRecord = {
+      id: 'match_' + Date.now(),
+      date: new Date().toISOString(),
+      teamName: matchState.teamName,
+      opponentName: matchState.opponentName,
+      ourSets: ourSetsFinal,
+      theirSets: theirSetsFinal,
+      mode: matchState.mode,
+      presentPlayerIds: [...matchState.presentIds],
+      playerSetsMap: { ...matchSetsPlayedFinal },
+      setsHistory: setsHistoryFinal
+    };
+    const nextMatchesHistory = [newMatchRecord, ...matchesHistory];
+    setMatchesHistory(nextMatchesHistory);
+    setPlayers(recalculatePlayersStatsFromMatches(players, nextMatchesHistory));
   };
 
   const handleConfirmValidateSet = () => {
@@ -943,7 +1007,7 @@ export default function VolleyManagerPro() {
     const nextTheirSets = matchState.theirSets + (ourWon ? 0 : 1);
 
     const courtPlayerIds = new Set(matchState.court.map(c => c.player.id));
-    const activeLiberoId = matchState.libero ? matchState.libero.id : null;
+    const activeLiberoId = matchState.libero?.id || null;
 
     const updatedMatchSetsPlayed = { ...matchState.matchSetsPlayed };
     courtPlayerIds.forEach(id => {
@@ -959,40 +1023,22 @@ export default function VolleyManagerPro() {
       theirScore: matchState.theirScore,
       winner: ourWon ? 'us' : 'them',
       lineupNames: matchState.court.map(c => c.player.name),
-      liberoName: matchState.libero ? matchState.libero.name : null
+      liberoName: matchState.libero?.name || null
     };
 
     const updatedSetsHistory = [...matchState.setsHistory, newSetRecord];
     const matchIsOver = nextOurSets === 3 || nextTheirSets === 3;
 
     if (matchIsOver) {
-      const newMatchRecord = {
-        id: 'match_' + Date.now(),
-        date: new Date().toISOString(),
-        teamName: matchState.teamName,
-        opponentName: matchState.opponentName,
-        ourSets: nextOurSets,
-        theirSets: nextTheirSets,
-        mode: matchState.mode,
-        presentPlayerIds: [...matchState.presentIds],
-        playerSetsMap: updatedMatchSetsPlayed,
-        setsHistory: updatedSetsHistory
-      };
-      const nextMatchesHistory = [newMatchRecord, ...matchesHistory];
-      const recalculatedPlayers = recalculatePlayersStatsFromMatches(players, nextMatchesHistory);
-
-      const finishedMatchState = {
+      recordMatchInHistory(nextOurSets, nextTheirSets, updatedSetsHistory, updatedMatchSetsPlayed);
+      setMatchState({
         ...matchState,
         ourSets: nextOurSets,
         theirSets: nextTheirSets,
         setsHistory: updatedSetsHistory,
         matchSetsPlayed: updatedMatchSetsPlayed,
         historyRecorded: true
-      };
-
-      setPlayers(recalculatedPlayers);
-      setMatchesHistory(nextMatchesHistory);
-      setMatchState(finishedMatchState);
+      });
       setNextSetModalOpen(false);
       setIsLandscapeFullscreen(false);
       showToast(
@@ -1005,7 +1051,7 @@ export default function VolleyManagerPro() {
     }
 
     const nextSetNumber = matchState.currentSet + 1;
-    const nextLockedLiberoId = activeLiberoId ? activeLiberoId : 'NONE';
+    const nextLockedLiberoId = activeLiberoId || 'NONE';
 
     const nextLineup = generateOptimalLineup({
       presentPlayers,
@@ -1023,7 +1069,7 @@ export default function VolleyManagerPro() {
       new Set([...(matchState.enteredCourtIds || []), ...nextLineup.court.map(c => c.player.id)])
     );
 
-    const nextMatchState = {
+    setMatchState({
       ...matchState,
       setterSystem: pendingNextSetSystem,
       lockedLiberoId: nextLockedLiberoId,
@@ -1040,9 +1086,8 @@ export default function VolleyManagerPro() {
       bench: nextLineup.bench,
       algorithmNotes: nextLineup.explanations,
       algorithmWarnings: nextLineup.warnings
-    };
+    });
 
-    setMatchState(nextMatchState);
     setNextSetModalOpen(false);
     showToast(`Set ${nextSetNumber} généré (${nextOurSets}-${nextTheirSets}).`, 'success');
   };
@@ -1056,92 +1101,44 @@ export default function VolleyManagerPro() {
       showToast('Ce match est déjà enregistré dans l’historique.', 'info');
       return;
     }
-    const newMatchRecord = {
-      id: 'match_' + Date.now(),
-      date: new Date().toISOString(),
-      teamName: matchState.teamName,
-      opponentName: matchState.opponentName,
-      ourSets: matchState.ourSets,
-      theirSets: matchState.theirSets,
-      mode: matchState.mode,
-      presentPlayerIds: [...matchState.presentIds],
-      playerSetsMap: { ...matchState.matchSetsPlayed },
-      setsHistory: matchState.setsHistory
-    };
-    const nextMatchesHistory = [newMatchRecord, ...matchesHistory];
-    const recalculatedPlayers = recalculatePlayersStatsFromMatches(players, nextMatchesHistory);
-
-    setMatchesHistory(nextMatchesHistory);
-    setPlayers(recalculatedPlayers);
+    recordMatchInHistory(matchState.ourSets, matchState.theirSets, matchState.setsHistory, matchState.matchSetsPlayed);
     setMatchState({ ...matchState, historyRecorded: true });
     showToast('Match enregistré et statistiques mises à jour !', 'success');
   };
 
   const toggleReverseScoreboard = () => {
-    setMatchState({
-      ...matchState,
-      isScoreboardReversed: !matchState.isScoreboardReversed
-    });
+    setMatchState(prev => ({ ...prev, isScoreboardReversed: !prev.isScoreboardReversed }));
   };
 
-  const matchFinished = matchState.ourSets === 3 || matchState.theirSets === 3;
-  const targetPoints = matchState.currentSet === 5 ? 15 : 25;
+  // Configuration factorisée des côtés Gauche et Droite du Scoreboard
+  const ourTeamPanel = {
+    isUs: true,
+    name: matchState.teamName,
+    score: matchState.ourScore,
+    sets: matchState.ourSets,
+    alert: getTeamPointAlert(matchState.ourScore, matchState.theirScore, matchState.ourSets, matchState.currentSet),
+    colorClass: 'text-indigo-400',
+    alertClass: 'bg-indigo-500/25 border-indigo-400 text-indigo-200',
+    btnPlusClass: 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/20',
+    onIncrement: () => setMatchState(prev => ({ ...prev, ourScore: prev.ourScore + 1 })),
+    onDecrement: () => setMatchState(prev => ({ ...prev, ourScore: Math.max(0, prev.ourScore - 1) }))
+  };
 
-  const ourAlert = getTeamPointAlert(matchState.ourScore, matchState.theirScore, matchState.ourSets, matchState.currentSet);
-  const theirAlert = getTeamPointAlert(matchState.theirScore, matchState.ourScore, matchState.theirSets, matchState.currentSet);
+  const theirTeamPanel = {
+    isUs: false,
+    name: matchState.opponentName,
+    score: matchState.theirScore,
+    sets: matchState.theirSets,
+    alert: getTeamPointAlert(matchState.theirScore, matchState.ourScore, matchState.theirSets, matchState.currentSet),
+    colorClass: 'text-rose-400',
+    alertClass: 'bg-rose-500/25 border-rose-400 text-rose-200',
+    btnPlusClass: 'bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/20',
+    onIncrement: () => setMatchState(prev => ({ ...prev, theirScore: prev.theirScore + 1 })),
+    onDecrement: () => setMatchState(prev => ({ ...prev, theirScore: Math.max(0, prev.theirScore - 1) }))
+  };
 
-  const leftSide = matchState.isScoreboardReversed
-    ? {
-        isUs: false,
-        name: matchState.opponentName,
-        score: matchState.theirScore,
-        sets: matchState.theirSets,
-        alert: theirAlert,
-        colorClass: 'text-rose-400',
-        btnPlusClass: 'bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/20',
-        onIncrement: () => setMatchState({ ...matchState, theirScore: matchState.theirScore + 1 }),
-        onDecrement: () => setMatchState({ ...matchState, theirScore: Math.max(0, matchState.theirScore - 1) })
-      }
-    : {
-        isUs: true,
-        name: matchState.teamName,
-        score: matchState.ourScore,
-        sets: matchState.ourSets,
-        alert: ourAlert,
-        colorClass: 'text-indigo-400',
-        btnPlusClass: 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/20',
-        onIncrement: () => setMatchState({ ...matchState, ourScore: matchState.ourScore + 1 }),
-        onDecrement: () => setMatchState({ ...matchState, ourScore: Math.max(0, matchState.ourScore - 1) })
-      };
-
-  const rightSide = matchState.isScoreboardReversed
-    ? {
-        isUs: true,
-        name: matchState.teamName,
-        score: matchState.ourScore,
-        sets: matchState.ourSets,
-        alert: ourAlert,
-        colorClass: 'text-indigo-400',
-        btnPlusClass: 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/20',
-        onIncrement: () => setMatchState({ ...matchState, ourScore: matchState.ourScore + 1 }),
-        onDecrement: () => setMatchState({ ...matchState, ourScore: Math.max(0, matchState.ourScore - 1) })
-      }
-    : {
-        isUs: false,
-        name: matchState.opponentName,
-        score: matchState.theirScore,
-        sets: matchState.theirSets,
-        alert: theirAlert,
-        colorClass: 'text-rose-400',
-        btnPlusClass: 'bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/20',
-        onIncrement: () => setMatchState({ ...matchState, theirScore: matchState.theirScore + 1 }),
-        onDecrement: () => setMatchState({ ...matchState, theirScore: Math.max(0, matchState.theirScore - 1) })
-      };
-
-  const eligibleBenchForLibero = useMemo(() => {
-    const enteredSet = new Set(matchState.enteredCourtIds || []);
-    return matchState.bench.filter(p => !enteredSet.has(p.id));
-  }, [matchState.bench, matchState.enteredCourtIds]);
+  const leftSide = matchState.isScoreboardReversed ? theirTeamPanel : ourTeamPanel;
+  const rightSide = matchState.isScoreboardReversed ? ourTeamPanel : theirTeamPanel;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex justify-center select-none font-sans">
@@ -1179,13 +1176,15 @@ export default function VolleyManagerPro() {
 
         {toastMessage && (
           <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 w-[90%] max-w-sm animate-bounce">
-            <div className={`px-4 py-3 rounded-xl shadow-xl border flex items-center gap-2.5 text-xs font-medium ${
-              toastMessage.type === 'error'
-                ? 'bg-rose-950/95 border-rose-500/50 text-rose-200'
-                : toastMessage.type === 'success'
-                ? 'bg-emerald-950/95 border-emerald-500/50 text-emerald-200'
-                : 'bg-slate-800/95 border-slate-600 text-slate-100'
-            }`}>
+            <div
+              className={`px-4 py-3 rounded-xl shadow-xl border flex items-center gap-2.5 text-xs font-medium ${
+                toastMessage.type === 'error'
+                  ? 'bg-rose-950/95 border-rose-500/50 text-rose-200'
+                  : toastMessage.type === 'success'
+                  ? 'bg-emerald-950/95 border-emerald-500/50 text-emerald-200'
+                  : 'bg-slate-800/95 border-slate-600 text-slate-100'
+              }`}
+            >
               <Sparkles className="w-4 h-4 shrink-0" />
               <span>{toastMessage.msg}</span>
             </div>
@@ -1208,7 +1207,6 @@ export default function VolleyManagerPro() {
                   <button
                     onClick={() => setConfirmSeasonResetOpen(true)}
                     className="px-2.5 py-2 rounded-xl bg-slate-700/70 hover:bg-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1 active:scale-95 transition"
-                    title="Nouvelle Saison"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
                     <span>Reset Saison</span>
@@ -1237,11 +1235,13 @@ export default function VolleyManagerPro() {
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2.5">
-                          <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-sm ${
-                            player.gender === 'F'
-                              ? 'bg-pink-500/20 text-pink-300 border border-pink-500/30'
-                              : 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
-                          }`}>
+                          <div
+                            className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-sm ${
+                              player.gender === 'F'
+                                ? 'bg-pink-500/20 text-pink-300 border border-pink-500/30'
+                                : 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                            }`}
+                          >
                             {player.gender === 'F' ? 'F' : 'H'}
                           </div>
                           <div>
@@ -1447,11 +1447,13 @@ export default function VolleyManagerPro() {
                       Tous
                     </button>
                     <button
-                      onClick={() => setMatchState({
-                        ...matchState,
-                        presentIds: [],
-                        lockedLiberoId: matchState.lockedLiberoId === 'NONE' ? 'NONE' : null
-                      })}
+                      onClick={() =>
+                        setMatchState({
+                          ...matchState,
+                          presentIds: [],
+                          lockedLiberoId: matchState.lockedLiberoId === 'NONE' ? 'NONE' : null
+                        })
+                      }
                       className="px-2.5 py-1 rounded-lg bg-slate-800 text-[11px] text-slate-300 hover:bg-slate-700"
                     >
                       Aucun
@@ -1474,17 +1476,21 @@ export default function VolleyManagerPro() {
                         }`}
                       >
                         <div className="flex items-center gap-3">
-                          <div className={`w-5 h-5 rounded-md flex items-center justify-center border ${
-                            isChecked ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-slate-700 bg-slate-900'
-                          }`}>
+                          <div
+                            className={`w-5 h-5 rounded-md flex items-center justify-center border ${
+                              isChecked ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-slate-700 bg-slate-900'
+                            }`}
+                          >
                             {isChecked && <Check className="w-3.5 h-3.5" />}
                           </div>
                           <div>
                             <div className="text-xs font-bold flex items-center gap-1.5 flex-wrap">
                               <span>{player.name}</span>
-                              <span className={`text-[10px] px-1.5 py-0.2 rounded ${
-                                player.gender === 'F' ? 'bg-pink-500/20 text-pink-300' : 'bg-sky-500/20 text-sky-300'
-                              }`}>
+                              <span
+                                className={`text-[10px] px-1.5 py-0.2 rounded ${
+                                  player.gender === 'F' ? 'bg-pink-500/20 text-pink-300' : 'bg-sky-500/20 text-sky-300'
+                                }`}
+                              >
                                 {player.gender === 'F' ? 'F' : 'H'}
                               </span>
                               {isDesignatedLibero && isChecked && (
@@ -1537,7 +1543,7 @@ export default function VolleyManagerPro() {
                 </div>
               ) : (
                 <>
-                  {/* SCOREBOARD AGRANDI */}
+                  {/* SCOREBOARD */}
                   <div className="bg-gradient-to-b from-slate-800/90 to-slate-900 border border-slate-700/80 rounded-2xl p-3.5 shadow-xl">
                     <div className="flex items-center justify-between mb-2 gap-1">
                       <span className="text-[11px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 flex items-center gap-1">
@@ -1563,97 +1569,72 @@ export default function VolleyManagerPro() {
                       </div>
                     </div>
 
-                    {/* Alertes visuelles automatiques BALLE DE MATCH / BALLE DE SET */}
                     {(leftSide.alert || rightSide.alert) && (
                       <div className="grid grid-cols-2 gap-2 mb-2">
-                        <div>
-                          {leftSide.alert && (
-                            <div className={`px-2 py-1 rounded-lg text-center text-[10px] font-black uppercase tracking-wider animate-pulse border ${
-                              leftSide.alert === 'BALLE DE MATCH'
-                                ? 'bg-amber-500/25 border-amber-400 text-amber-200'
-                                : 'bg-indigo-500/25 border-indigo-400 text-indigo-200'
-                            }`}>
-                              ⚡ {leftSide.alert} ({leftSide.name})
-                            </div>
-                          )}
-                        </div>
-                        <div>
-                          {rightSide.alert && (
-                            <div className={`px-2 py-1 rounded-lg text-center text-[10px] font-black uppercase tracking-wider animate-pulse border ${
-                              rightSide.alert === 'BALLE DE MATCH'
-                                ? 'bg-amber-500/25 border-amber-400 text-amber-200'
-                                : 'bg-rose-500/25 border-rose-400 text-rose-200'
-                            }`}>
-                              ⚡ {rightSide.alert} ({rightSide.name})
-                            </div>
-                          )}
-                        </div>
+                        {[leftSide, rightSide].map((side, i) => (
+                          <div key={i}>
+                            {side.alert && (
+                              <div
+                                className={`px-2 py-1 rounded-lg text-center text-[10px] font-black uppercase tracking-wider animate-pulse border ${
+                                  side.alert === 'BALLE DE MATCH'
+                                    ? 'bg-amber-500/25 border-amber-400 text-amber-200'
+                                    : side.alertClass
+                                }`}
+                              >
+                                ⚡ {side.alert} ({side.name})
+                              </div>
+                            )}
+                          </div>
+                        ))}
                       </div>
                     )}
 
                     <div className="grid grid-cols-11 items-center gap-1.5 my-1">
-                      <div className="col-span-5 bg-slate-950/80 border border-slate-800 rounded-2xl px-2 py-3 text-center flex flex-col justify-between overflow-hidden">
-                        <div className="text-xs font-bold text-slate-300 truncate px-1">{leftSide.name}</div>
-                        <div
-                          onClick={!matchFinished ? leftSide.onIncrement : undefined}
-                          className={`text-[4.5rem] leading-none font-black my-2.5 tabular-nums tracking-tight cursor-pointer select-none ${leftSide.colorClass}`}
-                        >
-                          {leftSide.score}
-                        </div>
-                        <div className="flex justify-center gap-1.5 mt-1">
-                          <button
-                            onClick={leftSide.onDecrement}
-                            disabled={matchFinished}
-                            className="w-10 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-base active:scale-90 disabled:opacity-40"
+                      {[leftSide, null, rightSide].map((side, idx) => {
+                        if (!side) {
+                          return (
+                            <div key="center-sets" className="col-span-1 flex flex-col items-center justify-center px-0.5">
+                              <div className="text-[10px] uppercase text-slate-400 font-semibold">Sets</div>
+                              <div className="text-sm font-black text-white my-1 tabular-nums whitespace-nowrap">
+                                {leftSide.sets} - {rightSide.sets}
+                              </div>
+                              <div className="text-[9px] text-slate-500 whitespace-nowrap">min {targetPoints}</div>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div
+                            key={idx}
+                            className="col-span-5 bg-slate-950/80 border border-slate-800 rounded-2xl px-2 py-3 text-center flex flex-col justify-between overflow-hidden"
                           >
-                            -
-                          </button>
-                          <button
-                            onClick={leftSide.onIncrement}
-                            disabled={matchFinished}
-                            className={`flex-1 h-9 rounded-xl font-bold text-sm active:scale-95 disabled:opacity-40 ${leftSide.btnPlusClass}`}
-                          >
-                            +1
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="col-span-1 flex flex-col items-center justify-center px-0.5">
-                        <div className="text-[10px] uppercase text-slate-400 font-semibold">Sets</div>
-                        <div className="text-sm font-black text-white my-1 tabular-nums whitespace-nowrap">
-                          {leftSide.sets} - {rightSide.sets}
-                        </div>
-                        <div className="text-[9px] text-slate-500 whitespace-nowrap">min {targetPoints}</div>
-                      </div>
-
-                      <div className="col-span-5 bg-slate-950/80 border border-slate-800 rounded-2xl px-2 py-3 text-center flex flex-col justify-between overflow-hidden">
-                        <div className="text-xs font-bold text-slate-300 truncate px-1">{rightSide.name}</div>
-                        <div
-                          onClick={!matchFinished ? rightSide.onIncrement : undefined}
-                          className={`text-[4.5rem] leading-none font-black my-2.5 tabular-nums tracking-tight cursor-pointer select-none ${rightSide.colorClass}`}
-                        >
-                          {rightSide.score}
-                        </div>
-                        <div className="flex justify-center gap-1.5 mt-1">
-                          <button
-                            onClick={rightSide.onDecrement}
-                            disabled={matchFinished}
-                            className="w-10 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-base active:scale-90 disabled:opacity-40"
-                          >
-                            -
-                          </button>
-                          <button
-                            onClick={rightSide.onIncrement}
-                            disabled={matchFinished}
-                            className={`flex-1 h-9 rounded-xl font-bold text-sm active:scale-95 disabled:opacity-40 ${rightSide.btnPlusClass}`}
-                          >
-                            +1
-                          </button>
-                        </div>
-                      </div>
+                            <div className="text-xs font-bold text-slate-300 truncate px-1">{side.name}</div>
+                            <div
+                              onClick={!matchFinished ? side.onIncrement : undefined}
+                              className={`text-[4.5rem] leading-none font-black my-2.5 tabular-nums tracking-tight cursor-pointer select-none ${side.colorClass}`}
+                            >
+                              {side.score}
+                            </div>
+                            <div className="flex justify-center gap-1.5 mt-1">
+                              <button
+                                onClick={side.onDecrement}
+                                disabled={matchFinished}
+                                className="w-10 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-base active:scale-90 disabled:opacity-40"
+                              >
+                                -
+                              </button>
+                              <button
+                                onClick={side.onIncrement}
+                                disabled={matchFinished}
+                                className={`flex-1 h-9 rounded-xl font-bold text-sm active:scale-95 disabled:opacity-40 ${side.btnPlusClass}`}
+                              >
+                                +1
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
 
-                    {/* Raccourcis de suggestions de score (25-20, 20-25, etc.) */}
                     {!matchFinished && (
                       <div className="flex items-center justify-between gap-1.5 pt-2 mt-2 border-t border-slate-800/80">
                         <span className="text-[10px] text-slate-400 font-medium flex items-center gap-1 shrink-0">
@@ -1743,7 +1724,7 @@ export default function VolleyManagerPro() {
                     )}
                   </div>
 
-                  {/* TERRAIN DE VOLLEY-BALL AVEC EFFET MIROIR HORIZONTAL SUR LES DEUX LIGNES */}
+                  {/* TERRAIN DE VOLLEY-BALL : DISPOSITION IMPÉRATIVE & MOYENNES DYNAMIQUES */}
                   <div className="bg-slate-800/50 border border-slate-800 rounded-2xl p-3.5 space-y-3">
                     <div className="flex items-center justify-between">
                       <div>
@@ -1767,7 +1748,6 @@ export default function VolleyManagerPro() {
                     </div>
 
                     <div className="relative bg-gradient-to-b from-emerald-950/60 to-emerald-900/30 border-2 border-emerald-500/40 rounded-2xl p-3 space-y-3">
-                      {/* Moyenne offensive des 6 joueurs sur le terrain (hors Libéro) */}
                       <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-slate-950/85 border border-orange-500/40">
                         <span className="text-[11px] font-bold text-orange-300 flex items-center gap-1.5">
                           <Sword className="w-3.5 h-3.5 text-orange-400" />
@@ -1778,89 +1758,46 @@ export default function VolleyManagerPro() {
                         </span>
                       </div>
 
-                      {/* 1re ligne (Ligne avant) inversée de gauche à droite : R4 (P2), Central (P3), Passeur/Pointu (P4) */}
+                      {/* Ligne avant (1re ligne, de gauche à droite) : P4 (Central), P3 (R4), P2 (Passeur) */}
                       <div className="grid grid-cols-3 gap-2">
-                        {['P2', 'P3', 'P4'].map(posCode => {
+                        {FRONT_ROW_POSITIONS.map(posCode => {
                           const idx = matchState.court.findIndex(c => c.pos === posCode);
                           const slot = matchState.court[idx];
-                          if (!slot) return null;
-                          const isSelected = swapSelection?.zone === 'court' && swapSelection?.indexOrId === idx;
-                          const setsToday = matchState.matchSetsPlayed[slot.player.id] || 0;
-
                           return (
-                            <div
+                            <CourtPlayerCard
                               key={posCode}
-                              onClick={() => handlePlayerSlotTap('court', idx)}
-                              className={`p-2.5 rounded-xl border text-center cursor-pointer transition relative ${
-                                isSelected
-                                  ? 'bg-indigo-600/40 border-indigo-400 ring-2 ring-indigo-400 scale-[1.02]'
-                                  : 'bg-slate-900/85 border-slate-700/80 hover:border-emerald-500/50'
-                              }`}
-                            >
-                              <div className="flex items-center justify-between text-[9px] text-slate-400 mb-1">
-                                <span className={`px-1.5 py-0.2 rounded font-bold ${
-                                  slot.player.gender === 'F' ? 'bg-pink-500/20 text-pink-300' : 'bg-sky-500/20 text-sky-300'
-                                }`}>
-                                  {slot.player.gender === 'F' ? 'F' : 'H'}
-                                </span>
-                                <span className="text-orange-300 font-bold">
-                                  ⚔️{slot.player.attackLevel} 🛡️{slot.player.defenseLevel}
-                                </span>
-                              </div>
-                              <div className="font-bold text-xs text-white truncate">{slot.player.name}</div>
-                              <div className="text-[10px] text-amber-300/90 truncate mt-0.5">{slot.targetRole}</div>
-                              <div className="text-[9px] text-slate-400 mt-1 flex items-center justify-between">
-                                <span>{slot.matchType}</span>
-                                <span className="text-indigo-300 font-semibold">{formatSets(setsToday)}s</span>
-                              </div>
-                            </div>
+                              slot={slot}
+                              idx={idx}
+                              isSelected={swapSelection?.zone === 'court' && swapSelection?.indexOrId === idx}
+                              setsToday={slot ? matchState.matchSetsPlayed[slot.player.id] || 0 : 0}
+                              isFrontRow={true}
+                              onSelect={handlePlayerSlotTap}
+                            />
                           );
                         })}
                       </div>
 
                       <div className="border-t border-emerald-500/30 my-1"></div>
 
-                      {/* 2e ligne (Ligne arrière) inversée de gauche à droite : Passeur (P1), Central (P6), R4 (P5) */}
+                      {/* Ligne arrière (2e ligne, de gauche à droite) : P5 (Passeur/Pointu), P6 (R4), P1 (Central) */}
                       <div className="grid grid-cols-3 gap-2">
-                        {['P1', 'P6', 'P5'].map(posCode => {
+                        {BACK_ROW_POSITIONS.map(posCode => {
                           const idx = matchState.court.findIndex(c => c.pos === posCode);
                           const slot = matchState.court[idx];
-                          if (!slot) return null;
-                          const isSelected = swapSelection?.zone === 'court' && swapSelection?.indexOrId === idx;
-                          const setsToday = matchState.matchSetsPlayed[slot.player.id] || 0;
-
                           return (
-                            <div
+                            <CourtPlayerCard
                               key={posCode}
-                              onClick={() => handlePlayerSlotTap('court', idx)}
-                              className={`p-2.5 rounded-xl border text-center cursor-pointer transition relative ${
-                                isSelected
-                                  ? 'bg-indigo-600/40 border-indigo-400 ring-2 ring-indigo-400 scale-[1.02]'
-                                  : 'bg-slate-900/85 border-slate-700/80 hover:border-emerald-500/50'
-                              }`}
-                            >
-                              <div className="flex items-center justify-between text-[9px] text-slate-400 mb-1">
-                                <span className={`px-1.5 py-0.2 rounded font-bold ${
-                                  slot.player.gender === 'F' ? 'bg-pink-500/20 text-pink-300' : 'bg-sky-500/20 text-sky-300'
-                                }`}>
-                                  {slot.player.gender === 'F' ? 'F' : 'H'}
-                                </span>
-                                <span className="text-emerald-300 font-bold">
-                                  ⚔️{slot.player.attackLevel} 🛡️{slot.player.defenseLevel}
-                                </span>
-                              </div>
-                              <div className="font-bold text-xs text-white truncate">{slot.player.name}</div>
-                              <div className="text-[10px] text-amber-300/90 truncate mt-0.5">{slot.targetRole}</div>
-                              <div className="text-[9px] text-slate-400 mt-1 flex items-center justify-between">
-                                <span>{slot.matchType}</span>
-                                <span className="text-indigo-300 font-semibold">{formatSets(setsToday)}s</span>
-                              </div>
-                            </div>
+                              slot={slot}
+                              idx={idx}
+                              isSelected={swapSelection?.zone === 'court' && swapSelection?.indexOrId === idx}
+                              setsToday={slot ? matchState.matchSetsPlayed[slot.player.id] || 0 : 0}
+                              isFrontRow={false}
+                              onSelect={handlePlayerSlotTap}
+                            />
                           );
                         })}
                       </div>
 
-                      {/* Moyenne défensive des 6 joueurs sur le terrain (hors Libéro) */}
                       <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-slate-950/85 border border-emerald-500/40">
                         <span className="text-[11px] font-bold text-emerald-300 flex items-center gap-1.5">
                           <Shield className="w-3.5 h-3.5 text-emerald-400" />
@@ -1967,9 +1904,11 @@ export default function VolleyManagerPro() {
                                 <div className="truncate pr-1">
                                   <div className="text-xs font-bold text-white truncate flex items-center gap-1">
                                     <span>{p.name}</span>
-                                    <span className={`text-[9px] px-1 rounded ${
-                                      p.gender === 'F' ? 'bg-pink-500/20 text-pink-300' : 'bg-sky-500/20 text-sky-300'
-                                    }`}>
+                                    <span
+                                      className={`text-[9px] px-1 rounded ${
+                                        p.gender === 'F' ? 'bg-pink-500/20 text-pink-300' : 'bg-sky-500/20 text-sky-300'
+                                      }`}
+                                    >
                                       {p.gender === 'F' ? 'F' : 'H'}
                                     </span>
                                     {wasLibero && (
@@ -2080,14 +2019,14 @@ export default function VolleyManagerPro() {
                             <div className="flex items-center justify-between gap-2">
                               <div>
                                 <div className="flex items-center gap-2">
-                                  <span className="text-xs font-bold text-white">
-                                    vs {m.opponentName}
-                                  </span>
-                                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                    won
-                                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                      : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                                  }`}>
+                                  <span className="text-xs font-bold text-white">vs {m.opponentName}</span>
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                      won
+                                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                        : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                    }`}
+                                  >
                                     {won ? 'Victoire' : 'Défaite'}
                                   </span>
                                 </div>
@@ -2100,11 +2039,13 @@ export default function VolleyManagerPro() {
                               </div>
 
                               <div className="flex items-center gap-2">
-                                <div className={`text-base font-black px-3 py-1 rounded-xl border tabular-nums whitespace-nowrap ${
-                                  won
-                                    ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300'
-                                    : 'bg-rose-950/50 border-rose-500/40 text-rose-300'
-                                }`}>
+                                <div
+                                  className={`text-base font-black px-3 py-1 rounded-xl border tabular-nums whitespace-nowrap ${
+                                    won
+                                      ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300'
+                                      : 'bg-rose-950/50 border-rose-500/40 text-rose-300'
+                                  }`}
+                                >
                                   {m.ourSets} - {m.theirSets}
                                 </div>
                                 <button
@@ -2171,11 +2112,7 @@ export default function VolleyManagerPro() {
                         <div className="w-full h-2.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800">
                           <div
                             className={`h-full rounded-full transition-all duration-300 ${
-                              pct >= 65
-                                ? 'bg-emerald-500'
-                                : pct >= 35
-                                ? 'bg-indigo-500'
-                                : 'bg-amber-500'
+                              pct >= 65 ? 'bg-emerald-500' : pct >= 35 ? 'bg-indigo-500' : 'bg-amber-500'
                             }`}
                             style={{ width: `${pct}%` }}
                           />
@@ -2187,16 +2124,14 @@ export default function VolleyManagerPro() {
               </div>
 
               <div className="bg-slate-800/50 border border-slate-800 rounded-2xl p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
-                      <Award className="w-4 h-4 text-amber-400" />
-                      <span>Classement & Statistiques Individuelles</span>
-                    </h3>
-                    <p className="text-[11px] text-slate-400">
-                      Synchronisé avec les matchs enregistrés et le score du match
-                    </p>
-                  </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
+                    <Award className="w-4 h-4 text-amber-400" />
+                    <span>Classement & Statistiques Individuelles</span>
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Synchronisé avec les matchs enregistrés et le score du match
+                  </p>
                 </div>
 
                 <div className="overflow-x-auto">
@@ -2344,103 +2279,76 @@ export default function VolleyManagerPro() {
               </div>
 
               <div className="flex-1 grid grid-cols-12 items-center gap-3 my-2 min-h-0">
-                <div className="col-span-5 h-full bg-slate-900/90 border-2 border-slate-800 rounded-3xl p-3 flex flex-col justify-between items-center overflow-hidden">
-                  <div className="w-full flex items-center justify-between px-1 gap-2 shrink-0">
-                    <span className="text-base sm:text-lg font-extrabold text-slate-200 truncate">{leftSide.name}</span>
-                    {leftSide.alert && (
-                      <span className={`px-2 py-0.5 rounded-lg text-[10px] font-black uppercase whitespace-nowrap animate-pulse border ${
-                        leftSide.alert === 'BALLE DE MATCH'
-                          ? 'bg-amber-500/30 border-amber-400 text-amber-200'
-                          : 'bg-indigo-500/30 border-indigo-400 text-indigo-200'
-                      }`}>
-                        {leftSide.alert}
-                      </span>
-                    )}
-                  </div>
+                {[leftSide, null, rightSide].map((side, idx) => {
+                  if (!side) {
+                    return (
+                      <div key="landscape-sets" className="col-span-2 flex flex-col items-center justify-center gap-1.5 px-1">
+                        <div className="text-[11px] font-bold uppercase text-slate-400 tracking-wider">SETS</div>
+                        <div className="px-2.5 py-1.5 rounded-2xl bg-slate-900 border border-slate-700 text-xl sm:text-2xl font-black text-white tabular-nums whitespace-nowrap shrink-0">
+                          {leftSide.sets} - {rightSide.sets}
+                        </div>
+                        {isSetScoreValidToFinish() && !matchFinished && (
+                          <button
+                            onClick={() => {
+                              setIsLandscapeFullscreen(false);
+                              setForceRotate90(false);
+                              handleOpenValidateSetModal();
+                            }}
+                            className="mt-2 px-2.5 py-2 rounded-xl bg-emerald-600 text-white font-bold text-[11px] text-center shadow-lg animate-pulse whitespace-nowrap"
+                          >
+                            Valider Set
+                          </button>
+                        )}
+                      </div>
+                    );
+                  }
 
-                  <div
-                    onClick={!matchFinished ? leftSide.onIncrement : undefined}
-                    className={`text-[7.5rem] sm:text-[9rem] leading-none font-black tabular-nums tracking-tight cursor-pointer select-none my-auto ${leftSide.colorClass}`}
-                  >
-                    {leftSide.score}
-                  </div>
-
-                  <div className="w-full grid grid-cols-3 gap-2 shrink-0">
-                    <button
-                      onClick={leftSide.onDecrement}
-                      disabled={matchFinished}
-                      className="col-span-1 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-black text-lg active:scale-95 disabled:opacity-40"
+                  return (
+                    <div
+                      key={idx}
+                      className="col-span-5 h-full bg-slate-900/90 border-2 border-slate-800 rounded-3xl p-3 flex flex-col justify-between items-center overflow-hidden"
                     >
-                      -1
-                    </button>
-                    <button
-                      onClick={leftSide.onIncrement}
-                      disabled={matchFinished}
-                      className={`col-span-2 py-2.5 rounded-2xl font-black text-lg active:scale-95 disabled:opacity-40 ${leftSide.btnPlusClass}`}
-                    >
-                      +1 PT
-                    </button>
-                  </div>
-                </div>
+                      <div className="w-full flex items-center justify-between px-1 gap-2 shrink-0">
+                        <span className="text-base sm:text-lg font-extrabold text-slate-200 truncate">{side.name}</span>
+                        {side.alert && (
+                          <span
+                            className={`px-2 py-0.5 rounded-lg text-[10px] font-black uppercase whitespace-nowrap animate-pulse border ${
+                              side.alert === 'BALLE DE MATCH'
+                                ? 'bg-amber-500/30 border-amber-400 text-amber-200'
+                                : side.alertClass
+                            }`}
+                          >
+                            {side.alert}
+                          </span>
+                        )}
+                      </div>
 
-                {/* Colonne centrale garantie sur une seule ligne */}
-                <div className="col-span-2 flex flex-col items-center justify-center gap-1.5 px-1">
-                  <div className="text-[11px] font-bold uppercase text-slate-400 tracking-wider">SETS</div>
-                  <div className="px-2.5 py-1.5 rounded-2xl bg-slate-900 border border-slate-700 text-xl sm:text-2xl font-black text-white tabular-nums whitespace-nowrap shrink-0">
-                    {leftSide.sets} - {rightSide.sets}
-                  </div>
-                  {isSetScoreValidToFinish() && !matchFinished && (
-                    <button
-                      onClick={() => {
-                        setIsLandscapeFullscreen(false);
-                        setForceRotate90(false);
-                        handleOpenValidateSetModal();
-                      }}
-                      className="mt-2 px-2.5 py-2 rounded-xl bg-emerald-600 text-white font-bold text-[11px] text-center shadow-lg animate-pulse whitespace-nowrap"
-                    >
-                      Valider Set
-                    </button>
-                  )}
-                </div>
+                      <div
+                        onClick={!matchFinished ? side.onIncrement : undefined}
+                        className={`text-[7.5rem] sm:text-[9rem] leading-none font-black tabular-nums tracking-tight cursor-pointer select-none my-auto ${side.colorClass}`}
+                      >
+                        {side.score}
+                      </div>
 
-                <div className="col-span-5 h-full bg-slate-900/90 border-2 border-slate-800 rounded-3xl p-3 flex flex-col justify-between items-center overflow-hidden">
-                  <div className="w-full flex items-center justify-between px-1 gap-2 shrink-0">
-                    <span className="text-base sm:text-lg font-extrabold text-slate-200 truncate">{rightSide.name}</span>
-                    {rightSide.alert && (
-                      <span className={`px-2 py-0.5 rounded-lg text-[10px] font-black uppercase whitespace-nowrap animate-pulse border ${
-                        rightSide.alert === 'BALLE DE MATCH'
-                          ? 'bg-amber-500/30 border-amber-400 text-amber-200'
-                          : 'bg-rose-500/30 border-rose-400 text-rose-200'
-                      }`}>
-                        {rightSide.alert}
-                      </span>
-                    )}
-                  </div>
-
-                  <div
-                    onClick={!matchFinished ? rightSide.onIncrement : undefined}
-                    className={`text-[7.5rem] sm:text-[9rem] leading-none font-black tabular-nums tracking-tight cursor-pointer select-none my-auto ${rightSide.colorClass}`}
-                  >
-                    {rightSide.score}
-                  </div>
-
-                  <div className="w-full grid grid-cols-3 gap-2 shrink-0">
-                    <button
-                      onClick={rightSide.onDecrement}
-                      disabled={matchFinished}
-                      className="col-span-1 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-black text-lg active:scale-95 disabled:opacity-40"
-                    >
-                      -1
-                    </button>
-                    <button
-                      onClick={rightSide.onIncrement}
-                      disabled={matchFinished}
-                      className={`col-span-2 py-2.5 rounded-2xl font-black text-lg active:scale-95 disabled:opacity-40 ${rightSide.btnPlusClass}`}
-                    >
-                      +1 PT
-                    </button>
-                  </div>
-                </div>
+                      <div className="w-full grid grid-cols-3 gap-2 shrink-0">
+                        <button
+                          onClick={side.onDecrement}
+                          disabled={matchFinished}
+                          className="col-span-1 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-black text-lg active:scale-95 disabled:opacity-40"
+                        >
+                          -1
+                        </button>
+                        <button
+                          onClick={side.onIncrement}
+                          disabled={matchFinished}
+                          className={`col-span-2 py-2.5 rounded-2xl font-black text-lg active:scale-95 disabled:opacity-40 ${side.btnPlusClass}`}
+                        >
+                          +1 PT
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -2672,8 +2580,6 @@ function PlayerFormModal({ player, allPlayers, onClose, onSave }) {
     player?.isCorpo ? 'corpo' : player?.isTitulaire ? 'titulaire' : 'normal'
   );
   const [incompatibilities, setIncompatibilities] = useState(player?.incompatibilities || []);
-  const [historyMatches, setHistoryMatches] = useState(player?.historyMatches || 0);
-  const [historySets, setHistorySets] = useState(player?.historySets || 0);
 
   const toggleRole = (role) => {
     if (roles.includes(role)) {
@@ -2684,11 +2590,9 @@ function PlayerFormModal({ player, allPlayers, onClose, onSave }) {
   };
 
   const toggleIncompatibility = (otherId) => {
-    if (incompatibilities.includes(otherId)) {
-      setIncompatibilities(incompatibilities.filter(id => id !== otherId));
-    } else {
-      setIncompatibilities([...incompatibilities, otherId]);
-    }
+    setIncompatibilities(prev =>
+      prev.includes(otherId) ? prev.filter(id => id !== otherId) : [...prev, otherId]
+    );
   };
 
   const handleSubmit = (e) => {
@@ -2702,9 +2606,7 @@ function PlayerFormModal({ player, allPlayers, onClose, onSave }) {
       roles,
       isTitulaire: statusType === 'titulaire',
       isCorpo: statusType === 'corpo',
-      incompatibilities,
-      historyMatches: Number(historyMatches),
-      historySets: Number(historySets)
+      incompatibilities
     });
   };
 
