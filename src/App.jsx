@@ -1,16 +1,25 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
 import {
   Users, CheckSquare, Play, BarChart3, Plus, Trash2, Edit3, ShieldAlert,
   RotateCw, Award, Sparkles, RefreshCw, AlertTriangle, Check, X,
   Trophy, Flame, Sliders, ArrowLeftRight, Info, Lock,
-  Maximize2, Minimize2, Calendar, Clock, Sword, Shield, Zap, UserPlus
+  Maximize2, Minimize2, Calendar, Clock, Sword, Shield, Zap, UserPlus,
+  Database, Download, Upload, History, CheckCircle2, XCircle, FileJson, ShieldCheck
 } from 'lucide-react';
 
 // ============================================================================
 // 1. CONSTANTES & CONFIGURATION TACTIQUE DE RÉFÉRENCE
 // ============================================================================
+
+const APP_VERSION = '4.2.0';
+const BACKUP_SCHEMA_VERSION = '1.0.0';
+const IDB_DB_NAME = 'VolleyManagerBackupDB';
+const IDB_STORE_NAME = 'backups';
+const IDB_VERSION = 1;
+const FALLBACK_VAULT_KEY = 'vmp_backup_vault_fallback_v1';
+const BACKUP_SETTINGS_KEY = 'vmp_backup_settings_v1';
 
 const ROLES = ['Passeur', 'R4', 'Central', 'Pointu', 'Libéro', 'Polyvalent'];
 
@@ -33,21 +42,19 @@ const FRONT_ROW_POSITIONS = ['P4', 'P3', 'P2'];
 const BACK_ROW_POSITIONS = ['P5', 'P6', 'P1'];
 
 const ROTATION_RECEIVE_FROM = {
-  P3: 'P4', // Avant Centre reçoit Avant Gauche
-  P2: 'P3', // Avant Droite reçoit Avant Centre
-  P1: 'P2', // Arrière Droite reçoit Avant Droite
-  P6: 'P1', // Arrière Centre reçoit Arrière Droite
-  P5: 'P6', // Arrière Gauche reçoit Arrière Centre
-  P4: 'P5', // Avant Gauche reçoit Arrière Gauche
+  P3: 'P4',
+  P2: 'P3',
+  P1: 'P2',
+  P6: 'P1',
+  P5: 'P6',
+  P4: 'P5',
 };
 
 function getRequiredSlots(setterSystem = 1) {
   return [
-    // Ligne avant (de gauche à droite : Central, R4, Passeur)
     { pos: 'P4', row: 'front', targetRole: 'Central', label: 'Central' },
     { pos: 'P3', row: 'front', targetRole: 'R4', label: 'R4' },
     { pos: 'P2', row: 'front', targetRole: 'Passeur', label: 'Passeur' },
-    // Ligne arrière (de gauche à droite : Passeur [ou Pointu en 1P], R4, Central)
     {
       pos: 'P5',
       row: 'back',
@@ -135,23 +142,48 @@ const formatDateFr = (isoString) => {
   }
 };
 
+const formatDateTimeFr = (isoString) => {
+  if (!isoString) return 'Aucune';
+  try {
+    return new Date(isoString).toLocaleString('fr-FR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+  } catch {
+    return isoString;
+  }
+};
+
 function migratePlayer(p) {
+  if (!p || typeof p !== 'object') return null;
   const legacyLevel = Number(p.level || 3);
-  const attackLevel = p.attackLevel !== undefined ? Number(p.attackLevel) : legacyLevel;
-  const defenseLevel = p.defenseLevel !== undefined ? Number(p.defenseLevel) : legacyLevel;
+  const attackLevel = p.attackLevel !== undefined ? Math.min(5, Math.max(1, Number(p.attackLevel))) : legacyLevel;
+  const defenseLevel = p.defenseLevel !== undefined ? Math.min(5, Math.max(1, Number(p.defenseLevel))) : legacyLevel;
   return {
-    ...p,
+    id: String(p.id || 'p_' + Math.random().toString(36).slice(2, 9)),
+    name: String(p.name || 'Joueur').trim(),
+    gender: p.gender === 'F' ? 'F' : 'M',
     attackLevel,
     defenseLevel,
-    level: Number(((attackLevel + defenseLevel) / 2).toFixed(1))
+    level: Number(((attackLevel + defenseLevel) / 2).toFixed(1)),
+    roles: Array.isArray(p.roles) && p.roles.length > 0 ? p.roles : ['Polyvalent'],
+    isTitulaire: Boolean(p.isTitulaire),
+    isCorpo: Boolean(p.isCorpo),
+    incompatibilities: Array.isArray(p.incompatibilities) ? p.incompatibilities : [],
+    historyMatches: Math.max(0, Number(p.historyMatches || 0)),
+    historySets: Math.max(0, Number(p.historySets || 0))
   };
 }
 
-function recalculatePlayersStatsFromMatches(playersList, matchesList) {
+function recalculatePlayersStatsFromMatches(playersList, matchesList, preserveBaseline = false) {
   const matchesCountMap = {};
   const setsCountMap = {};
 
-  matchesList.forEach(m => {
+  (matchesList || []).forEach(m => {
     const pIds = m.presentPlayerIds || [];
     const sMap = m.playerSetsMap || {};
     pIds.forEach(id => {
@@ -165,11 +197,25 @@ function recalculatePlayersStatsFromMatches(playersList, matchesList) {
     });
   });
 
-  return playersList.map(p => ({
-    ...p,
-    historyMatches: matchesCountMap[p.id] || 0,
-    historySets: setsCountMap[p.id] || 0
-  }));
+  return playersList.map(p => {
+    const calcMatches = matchesCountMap[p.id] || 0;
+    const calcSets = setsCountMap[p.id] || 0;
+    return {
+      ...p,
+      historyMatches: preserveBaseline ? Math.max(Number(p.historyMatches || 0), calcMatches) : calcMatches,
+      historySets: preserveBaseline ? Math.max(Number(p.historySets || 0), calcSets) : calcSets
+    };
+  });
+}
+
+function computeGlobalTeamStats(matchesList) {
+  const list = matchesList || [];
+  const totalMatches = list.length;
+  const wins = list.filter(m => Number(m.ourSets) > Number(m.theirSets)).length;
+  const losses = totalMatches - wins;
+  const setsWon = list.reduce((acc, m) => acc + Number(m.ourSets || 0), 0);
+  const setsLost = list.reduce((acc, m) => acc + Number(m.theirSets || 0), 0);
+  return { totalMatches, wins, losses, setsWon, setsLost };
 }
 
 function getPlayerOverallScore(player) {
@@ -218,7 +264,363 @@ function getTeamPointAlert(teamScore, oppScore, teamSets, currentSet) {
 }
 
 // ============================================================================
-// 3. MOTEUR ALGORITHMIQUE DE SÉLECTION & COMPOSITION
+// 3. SYSTÈME DE SAUVEGARDE, INTÉGRITÉ, INDEXEDDB & POLITIQUE DE RÉTENTION
+// ============================================================================
+
+/**
+ * Empreinte déterministe FNV-1a (32-bit) pour vérifier l'intégrité des sauvegardes
+ * et détecter si les données ont réellement changé avant de créer une sauvegarde.
+ */
+function computeDeterministicChecksum(obj) {
+  const str = typeof obj === 'string' ? obj : JSON.stringify(obj);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return 'fnv1a_' + (hash >>> 0).toString(16).padStart(8, '0') + '_len' + str.length;
+}
+
+function computeCanonicalDataHash(players, matchesHistory, matchState) {
+  return computeDeterministicChecksum({
+    p: players,
+    m: matchesHistory,
+    a: matchState
+  });
+}
+
+function createBackupEnvelope({ players, matchesHistory, matchState, triggerType = 'auto', label = '' }) {
+  const timestamp = new Date().toISOString();
+  const teamStats = computeGlobalTeamStats(matchesHistory);
+  const individualStats = (players || []).map(p => ({
+    id: p.id,
+    name: p.name,
+    historyMatches: p.historyMatches || 0,
+    historySets: p.historySets || 0,
+    ratio: Number(getHistoricalRatio(p).toFixed(3))
+  }));
+
+  const dataPayload = {
+    players: players || [],
+    matchesHistory: matchesHistory || [],
+    matchState: matchState || null,
+    statisticsSnapshot: {
+      teamStats,
+      individualStats,
+      computedAt: timestamp
+    }
+  };
+
+  const checksum = computeDeterministicChecksum(dataPayload);
+  const dataHash = computeCanonicalDataHash(players, matchesHistory, matchState);
+
+  return {
+    id: 'bkp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+    schemaVersion: BACKUP_SCHEMA_VERSION,
+    appVersion: APP_VERSION,
+    createdAt: timestamp,
+    triggerType, // 'auto' | 'manual' | 'periodic' | 'pre-restore'
+    label: label || (triggerType === 'manual' ? 'Export manuel' : 'Sauvegarde automatique'),
+    status: 'success',
+    playersCount: (players || []).length,
+    matchesCount: (matchesHistory || []).length,
+    checksum,
+    dataHash,
+    data: dataPayload
+  };
+}
+
+/**
+ * Vérification stricte d'une sauvegarde (structure, version, intégrité checksum et cohérence des relations)
+ */
+function validateAndAnalyzeBackup(rawJson) {
+  const anomalies = [];
+  if (!rawJson || typeof rawJson !== 'object') {
+    return { valid: false, error: 'Le fichier fourni ne contient pas un objet JSON valide.', anomalies };
+  }
+
+  const schemaVersion = rawJson.schemaVersion;
+  if (!schemaVersion) {
+    return { valid: false, error: 'Version du format de sauvegarde (schemaVersion) manquante.', anomalies };
+  }
+  const majorVersion = String(schemaVersion).split('.')[0];
+  if (majorVersion !== '1') {
+    return {
+      valid: false,
+      error: `Version de schéma incompatible (${schemaVersion}). Version attendue : 1.x.`,
+      anomalies
+    };
+  }
+
+  const data = rawJson.data;
+  if (!data || typeof data !== 'object') {
+    return { valid: false, error: 'Section "data" absente ou corrompue dans la sauvegarde.', anomalies };
+  }
+
+  if (!Array.isArray(data.players) || !Array.isArray(data.matchesHistory)) {
+    return {
+      valid: false,
+      error: 'Les listes principales (players ou matchesHistory) sont absentes ou invalides.',
+      anomalies
+    };
+  }
+
+  // Vérification de la somme de contrôle (Checksum)
+  if (rawJson.checksum) {
+    const expectedChecksum = computeDeterministicChecksum(data);
+    if (expectedChecksum !== rawJson.checksum) {
+      return {
+        valid: false,
+        error: 'Échec du contrôle d’intégrité (checksum invalide) : le fichier a été altéré ou tronqué.',
+        anomalies
+      };
+    }
+  } else {
+    anomalies.push("Aucune empreinte checksum trouvée ; vérification structurelle appliquée.");
+  }
+
+  // Vérification de chaque joueur et de la cohérence des incompatibilités
+  const playerIds = new Set();
+  for (const p of data.players) {
+    if (!p || !p.id || !p.name) {
+      return { valid: false, error: 'Un joueur de la sauvegarde est dépourvu d’identifiant ou de nom.', anomalies };
+    }
+    if (playerIds.has(p.id)) {
+      anomalies.push(`Doublon d'identifiant joueur détecté (${p.id} - ${p.name}).`);
+    }
+    playerIds.add(p.id);
+  }
+
+  data.players.forEach(p => {
+    (p.incompatibilities || []).forEach(incId => {
+      if (!playerIds.has(incId)) {
+        anomalies.push(`Le joueur "${p.name}" référence une incompatibilité (${incId}) absente de la liste (sera nettoyée automatiquement).`);
+      }
+    });
+  });
+
+  // Vérification des matchs
+  for (const m of data.matchesHistory) {
+    if (!m || !m.id || m.ourSets === undefined || m.theirSets === undefined) {
+      return { valid: false, error: 'Un match enregistré dans la sauvegarde est incomplet ou corrompu.', anomalies };
+    }
+  }
+
+  return {
+    valid: true,
+    error: null,
+    anomalies,
+    summary: {
+      createdAt: rawJson.createdAt,
+      schemaVersion: rawJson.schemaVersion,
+      triggerType: rawJson.triggerType || 'externe',
+      playersCount: data.players.length,
+      matchesCount: data.matchesHistory.length,
+      hasActiveMatch: Boolean(data.matchState?.isActive)
+    }
+  };
+}
+
+/**
+ * Gestionnaire de stockage indépendant dans IndexedDB (avec repli sur localStorage)
+ */
+function openBackupIDB() {
+  return new Promise((resolve, reject) => {
+    if (typeof window === 'undefined' || !window.indexedDB) {
+      reject(new Error('IndexedDB non supporté'));
+      return;
+    }
+    const request = window.indexedDB.open(IDB_DB_NAME, IDB_VERSION);
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
+        const store = db.createObjectStore(IDB_STORE_NAME, { keyPath: 'id' });
+        store.createIndex('createdAt', 'createdAt', { unique: false });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Erreur ouverture IndexedDB'));
+  });
+}
+
+async function getAllStoredBackups() {
+  try {
+    const db = await openBackupIDB();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE_NAME, 'readonly');
+      const store = tx.objectStore(IDB_STORE_NAME);
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const list = Array.isArray(req.result) ? req.result : [];
+        list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        resolve(list);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    try {
+      const raw = localStorage.getItem(FALLBACK_VAULT_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    } catch {
+      return [];
+    }
+  }
+}
+
+/**
+ * Politique de conservation multi-niveaux :
+ * - Conserve les 5 sauvegardes réussies les plus récentes (sécurité court terme),
+ * - Conserve les 7 dernières sauvegardes quotidiennes (1 par jour calendaire),
+ * - Conserve les 4 dernières sauvegardes hebdomadaires (1 par semaine ISO),
+ * - Conserve la dernière sauvegarde mensuelle (1 par mois calendaire),
+ * - Conserve les 5 dernières sauvegardes manuelles / pré-restauration.
+ * Ne supprime JAMAIS toutes les sauvegardes valides.
+ */
+function applyRetentionPolicy(backupsList) {
+  if (!Array.isArray(backupsList) || backupsList.length <= 7) {
+    return backupsList.map(b => ({ ...b, retentionTier: b.retentionTier || 'Récente' }));
+  }
+
+  const sorted = [...backupsList].sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+
+  const keptMap = new Map();
+  const dailyBuckets = new Set();
+  const weeklyBuckets = new Set();
+  const monthlyBuckets = new Set();
+  let manualKept = 0;
+  let recentKept = 0;
+
+  const getDayKey = (d) => d.toISOString().slice(0, 10);
+  const getWeekKey = (d) => {
+    const firstJan = new Date(d.getFullYear(), 0, 1);
+    const week = Math.ceil((((d - firstJan) / 86400000) + firstJan.getDay() + 1) / 7);
+    return `${d.getFullYear()}-W${String(week).padStart(2, '0')}`;
+  };
+  const getMonthKey = (d) => d.toISOString().slice(0, 7);
+
+  for (const bkp of sorted) {
+    if (bkp.status !== 'success') {
+      if (keptMap.size < 25) keptMap.set(bkp.id, { ...bkp, retentionTier: 'Journal erreur' });
+      continue;
+    }
+
+    const d = new Date(bkp.createdAt);
+    const dayKey = getDayKey(d);
+    const weekKey = getWeekKey(d);
+    const monthKey = getMonthKey(d);
+
+    if (bkp.triggerType === 'manual' || bkp.triggerType === 'pre-restore') {
+      if (manualKept < 5) {
+        manualKept++;
+        keptMap.set(bkp.id, {
+          ...bkp,
+          retentionTier: bkp.triggerType === 'pre-restore' ? 'Sécurité pré-restauration' : 'Manuelle'
+        });
+        continue;
+      }
+    }
+
+    if (recentKept < 3) {
+      recentKept++;
+      dailyBuckets.add(dayKey);
+      keptMap.set(bkp.id, { ...bkp, retentionTier: 'Quotidienne (Récente)' });
+      continue;
+    }
+
+    if (!dailyBuckets.has(dayKey) && dailyBuckets.size < 7) {
+      dailyBuckets.add(dayKey);
+      keptMap.set(bkp.id, { ...bkp, retentionTier: 'Quotidienne (7j)' });
+      continue;
+    }
+
+    if (!weeklyBuckets.has(weekKey) && weeklyBuckets.size < 4) {
+      weeklyBuckets.add(weekKey);
+      keptMap.set(bkp.id, { ...bkp, retentionTier: 'Hebdomadaire (4 sem.)' });
+      continue;
+    }
+
+    if (!monthlyBuckets.has(monthKey) && monthlyBuckets.size < 1) {
+      monthlyBuckets.add(monthKey);
+      keptMap.set(bkp.id, { ...bkp, retentionTier: 'Mensuelle' });
+      continue;
+    }
+  }
+
+  // Garantie absolue : ne jamais supprimer toutes les sauvegardes
+  if (keptMap.size === 0 && sorted.length > 0) {
+    keptMap.set(sorted[0].id, { ...sorted[0], retentionTier: 'Dernière valide' });
+  }
+
+  return Array.from(keptMap.values()).sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+}
+
+async function saveBackupToVault(newBackup) {
+  // Vérifier l'intégrité du paquet avant de l'enregistrer
+  const check = validateAndAnalyzeBackup(newBackup);
+  if (!check.valid) {
+    throw new Error(check.error || 'Sauvegarde générée invalide');
+  }
+
+  const existing = await getAllStoredBackups();
+  const merged = [newBackup, ...existing.filter(b => b.id !== newBackup.id)];
+  const retained = applyRetentionPolicy(merged);
+
+  try {
+    const db = await openBackupIDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(IDB_STORE_NAME);
+      const retainedIds = new Set(retained.map(b => b.id));
+
+      existing.forEach(old => {
+        if (!retainedIds.has(old.id)) {
+          store.delete(old.id);
+        }
+      });
+      retained.forEach(item => {
+        store.put(item);
+      });
+
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // Repli sécurisé sur localStorage si IndexedDB est bloqué
+    const slimRetained = retained.slice(0, 10);
+    localStorage.setItem(FALLBACK_VAULT_KEY, JSON.stringify(slimRetained));
+  }
+
+  return retained;
+}
+
+function triggerJsonFileDownload(backupEnvelope) {
+  const dateObj = new Date(backupEnvelope.createdAt || Date.now());
+  const pad = (n) => String(n).padStart(2, '0');
+  const fileDate = `${dateObj.getFullYear()}-${pad(dateObj.getMonth() + 1)}-${pad(dateObj.getDate())}_${pad(dateObj.getHours())}-${pad(dateObj.getMinutes())}-${pad(dateObj.getSeconds())}`;
+  const fileName = `volley-manager-pro_sauvegarde_${fileDate}.json`;
+
+  const jsonString = JSON.stringify(backupEnvelope, null, 2);
+  const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement('a');
+  link.href = url;
+  link.setAttribute('download', fileName);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+
+  return fileName;
+}
+
+// ============================================================================
+// 4. MOTEUR ALGORITHMIQUE DE SÉLECTION & COMPOSITION
 // ============================================================================
 
 function getSelectionStrategy(setNumber, ourSets, theirSets) {
@@ -425,7 +827,7 @@ function generateOptimalLineup({
 }
 
 // ============================================================================
-// 4. SOUS-COMPOSANTS UI DÉCOUPLÉS
+// 5. SOUS-COMPOSANTS UI DÉCOUPLÉS
 // ============================================================================
 
 function CourtPlayerCard({ slot, idx, isSelected, setsToday, isFrontRow, onSelect }) {
@@ -462,7 +864,7 @@ function CourtPlayerCard({ slot, idx, isSelected, setsToday, isFrontRow, onSelec
 }
 
 // ============================================================================
-// 5. COMPOSANT PRINCIPAL : VOLLEY MANAGER PRO
+// 6. COMPOSANT PRINCIPAL : VOLLEY MANAGER PRO
 // ============================================================================
 
 export default function VolleyManagerPro() {
@@ -475,7 +877,7 @@ export default function VolleyManagerPro() {
         localStorage.getItem('vmp_players_v3') ||
         localStorage.getItem('vmp_players_v2');
       const parsed = saved ? JSON.parse(saved) : DEFAULT_ROSTER;
-      return parsed.map(migratePlayer);
+      return parsed.map(migratePlayer).filter(Boolean);
     } catch {
       return DEFAULT_ROSTER.map(migratePlayer);
     }
@@ -535,6 +937,7 @@ export default function VolleyManagerPro() {
     };
   });
 
+  // États des modales métier
   const [playerModalOpen, setPlayerModalOpen] = useState(false);
   const [editingPlayer, setEditingPlayer] = useState(null);
   const [swapSelection, setSwapSelection] = useState(null);
@@ -547,11 +950,42 @@ export default function VolleyManagerPro() {
   const [isLandscapeFullscreen, setIsLandscapeFullscreen] = useState(false);
   const [forceRotate90, setForceRotate90] = useState(false);
 
-  const showToast = (msg, type = 'info') => {
+  // États du système de Sauvegarde & Restauration
+  const [backupSettings, setBackupSettings] = useState(() => {
+    try {
+      const saved = localStorage.getItem(BACKUP_SETTINGS_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return {
+      autoBackupEnabled: true,
+      debounceSeconds: 2.5,
+      periodicHours: 24
+    };
+  });
+  const [backupsList, setBackupsList] = useState([]);
+  const [lastBackupAt, setLastBackupAt] = useState(null);
+  const [lastBackupError, setLastBackupError] = useState(null);
+  const [isBackupRunning, setIsBackupRunning] = useState(false);
+  const [dataManagerModalOpen, setDataManagerModalOpen] = useState(false);
+  const [pendingImportData, setPendingImportData] = useState(null);
+  const [importReport, setImportReport] = useState(null);
+  const [backupToRestoreFromHistory, setBackupToRestoreFromHistory] = useState(null);
+
+  const isSavingRef = useRef(false);
+  const lastSavedHashRef = useRef('');
+  const latestDataRef = useRef({ players, matchesHistory, matchState });
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    latestDataRef.current = { players, matchesHistory, matchState };
+  }, [players, matchesHistory, matchState]);
+
+  const showToast = useCallback((msg, type = 'info') => {
     setToastMessage({ msg, type });
     setTimeout(() => setToastMessage(null), 3500);
-  };
+  }, []);
 
+  // Sauvegarde synchrone dans localStorage (données vives)
   useEffect(() => {
     try { localStorage.setItem('vmp_players_v4', JSON.stringify(players)); } catch {}
   }, [players]);
@@ -564,6 +998,398 @@ export default function VolleyManagerPro() {
     try { localStorage.setItem('vmp_active_match_v4', JSON.stringify(matchState)); } catch {}
   }, [matchState]);
 
+  useEffect(() => {
+    try { localStorage.setItem(BACKUP_SETTINGS_KEY, JSON.stringify(backupSettings)); } catch {}
+  }, [backupSettings]);
+
+  // Fonction centrale d'exécution d'une sauvegarde avec verrou anti-concurrence et contrôle d'empreinte
+  const performBackup = useCallback(
+    async ({ triggerType = 'auto', label = '', force = false, silent = true } = {}) => {
+      if (isSavingRef.current) return null;
+      const { players: curPlayers, matchesHistory: curMatches, matchState: curMatchState } = latestDataRef.current;
+
+      const currentHash = computeCanonicalDataHash(curPlayers, curMatches, curMatchState);
+      if (!force && currentHash === lastSavedHashRef.current) {
+        return null; // Aucune donnée n'a changé : évite les doublons inutiles
+      }
+
+      isSavingRef.current = true;
+      setIsBackupRunning(true);
+
+      try {
+        const envelope = createBackupEnvelope({
+          players: curPlayers,
+          matchesHistory: curMatches,
+          matchState: curMatchState,
+          triggerType,
+          label
+        });
+
+        const updatedList = await saveBackupToVault(envelope);
+        lastSavedHashRef.current = currentHash;
+        setBackupsList(updatedList);
+        setLastBackupAt(envelope.createdAt);
+        setLastBackupError(null);
+
+        if (!silent) {
+          showToast('Sauvegarde enregistrée et vérifiée avec succès.', 'success');
+        }
+        return envelope;
+      } catch (err) {
+        const errMsg = err?.message || 'Erreur lors de la création de la sauvegarde';
+        setLastBackupError(`${formatDateTimeFr(new Date().toISOString())} : ${errMsg}`);
+        if (!silent) {
+          showToast(`Échec de la sauvegarde : ${errMsg}`, 'error');
+        }
+        return null;
+      } finally {
+        isSavingRef.current = false;
+        setIsBackupRunning(false);
+      }
+    },
+    [showToast]
+  );
+
+  // Chargement initial de l'historique des sauvegardes au démarrage + sauvegarde de démarrage si nécessaire
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const stored = await getAllStoredBackups();
+      if (!mounted) return;
+      setBackupsList(stored);
+
+      const latestSuccess = stored.find(b => b.status === 'success');
+      if (latestSuccess) {
+        setLastBackupAt(latestSuccess.createdAt);
+        lastSavedHashRef.current = latestSuccess.dataHash || '';
+      }
+
+      const currentHash = computeCanonicalDataHash(
+        latestDataRef.current.players,
+        latestDataRef.current.matchesHistory,
+        latestDataRef.current.matchState
+      );
+
+      // Si aucune sauvegarde n'existe ou que des modifications non sauvegardées sont détectées au démarrage
+      if (backupSettings.autoBackupEnabled && (!latestSuccess || latestSuccess.dataHash !== currentHash)) {
+        await performBackup({
+          triggerType: 'auto',
+          label: !latestSuccess ? 'Sauvegarde initiale au démarrage' : 'Synchronisation au démarrage',
+          force: true,
+          silent: true
+        });
+      }
+    })();
+    return () => { mounted = false; };
+  }, []); // Exécuté une seule fois au montage
+
+  // Déclenchement automatique avec regroupement (Debounce) après toute modification des données
+  useEffect(() => {
+    if (!backupSettings.autoBackupEnabled) return;
+    const currentHash = computeCanonicalDataHash(players, matchesHistory, matchState);
+    if (currentHash === lastSavedHashRef.current) return;
+
+    const delayMs = Math.max(800, Number(backupSettings.debounceSeconds || 2.5) * 1000);
+    const timer = setTimeout(() => {
+      performBackup({
+        triggerType: 'auto',
+        label: 'Sauvegarde auto (modification des données)',
+        force: false,
+        silent: true
+      });
+    }, delayMs);
+
+    return () => clearTimeout(timer);
+  }, [players, matchesHistory, matchState, backupSettings.autoBackupEnabled, backupSettings.debounceSeconds, performBackup]);
+
+  // Sauvegarde périodique (quotidienne) et lors de la mise en arrière-plan / fermeture sur iPhone
+  useEffect(() => {
+    if (!backupSettings.autoBackupEnabled) return;
+
+    const handleVisibilityOrUnload = () => {
+      if (document.visibilityState === 'hidden') {
+        performBackup({
+          triggerType: 'periodic',
+          label: 'Sauvegarde auto (mise en arrière-plan)',
+          force: false,
+          silent: true
+        });
+      }
+    };
+
+    const intervalMs = 15 * 60 * 1000; // Vérification toutes les 15 minutes
+    const intervalId = setInterval(() => {
+      const hoursThreshold = Number(backupSettings.periodicHours || 24);
+      const elapsedHours = lastBackupAt
+        ? (Date.now() - new Date(lastBackupAt).getTime()) / 3600000
+        : 999;
+
+      if (elapsedHours >= hoursThreshold) {
+        performBackup({
+          triggerType: 'periodic',
+          label: 'Sauvegarde périodique quotidienne',
+          force: false,
+          silent: true
+        });
+      }
+    }, intervalMs);
+
+    document.addEventListener('visibilitychange', handleVisibilityOrUnload);
+    window.addEventListener('pagehide', handleVisibilityOrUnload);
+
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityOrUnload);
+      window.removeEventListener('pagehide', handleVisibilityOrUnload);
+    };
+  }, [backupSettings.autoBackupEnabled, backupSettings.periodicHours, lastBackupAt, performBackup]);
+
+  // Exportation manuelle en fichier JSON téléchargeable
+  const handleManualExportFile = async () => {
+    const envelope = await performBackup({
+      triggerType: 'manual',
+      label: 'Exportation manuelle par l’utilisateur',
+      force: true,
+      silent: true
+    });
+    const backupToDownload =
+      envelope ||
+      createBackupEnvelope({
+        players,
+        matchesHistory,
+        matchState,
+        triggerType: 'manual',
+        label: 'Exportation manuelle'
+      });
+
+    const fileName = triggerJsonFileDownload(backupToDownload);
+    showToast(`Sauvegarde exportée : ${fileName}`, 'success');
+  };
+
+  // Sélection et analyse préalable d'un fichier de sauvegarde à importer
+  const handleFileImportSelect = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const parsed = JSON.parse(String(e.target?.result || ''));
+        const validation = validateAndAnalyzeBackup(parsed);
+        if (!validation.valid) {
+          setLastBackupError(`Import rejeté : ${validation.error}`);
+          showToast(validation.error, 'error');
+          return;
+        }
+        setImportReport(null);
+        setPendingImportData({
+          fileName: file.name,
+          envelope: parsed,
+          validation
+        });
+      } catch {
+        setLastBackupError('Import rejeté : Le fichier sélectionné n’est pas un fichier JSON valide.');
+        showToast('Fichier invalide : impossible de lire le contenu JSON.', 'error');
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = '';
+  };
+
+  // Application atomique d'une RESTAURATION COMPLÈTE (depuis un fichier ou depuis l'historique IndexedDB)
+  const executeFullRestore = async (targetEnvelope, createSafetyBackupFirst = true) => {
+    const snapshotPrevPlayers = [...players];
+    const snapshotPrevMatches = [...matchesHistory];
+    const snapshotPrevMatchState = { ...matchState };
+
+    try {
+      const check = validateAndAnalyzeBackup(targetEnvelope);
+      if (!check.valid) {
+        throw new Error(check.error || 'Sauvegarde corrompue');
+      }
+
+      if (createSafetyBackupFirst) {
+        await performBackup({
+          triggerType: 'pre-restore',
+          label: 'Sauvegarde de sécurité avant restauration complète',
+          force: true,
+          silent: true
+        });
+      }
+
+      const rawPlayers = targetEnvelope.data.players.map(migratePlayer).filter(Boolean);
+      const validPlayerIds = new Set(rawPlayers.map(p => p.id));
+
+      // Nettoyage relationnel des incompatibilités
+      const cleanedPlayers = rawPlayers.map(p => ({
+        ...p,
+        incompatibilities: (p.incompatibilities || []).filter(id => validPlayerIds.has(id) && id !== p.id)
+      }));
+
+      const restoredMatches = Array.isArray(targetEnvelope.data.matchesHistory)
+        ? targetEnvelope.data.matchesHistory
+        : [];
+
+      // Recalcul de cohérence des statistiques tout en préservant les compteurs historiques s'ils sont supérieurs
+      const synchronizedPlayers = recalculatePlayersStatsFromMatches(cleanedPlayers, restoredMatches, true);
+
+      const restoredMatchState = targetEnvelope.data.matchState
+        ? {
+            ...targetEnvelope.data.matchState,
+            court: (targetEnvelope.data.matchState.court || []).map(c => ({
+              ...c,
+              player: migratePlayer(c.player)
+            })),
+            bench: (targetEnvelope.data.matchState.bench || []).map(migratePlayer).filter(Boolean),
+            libero: targetEnvelope.data.matchState.libero
+              ? migratePlayer(targetEnvelope.data.matchState.libero)
+              : null
+          }
+        : matchState;
+
+      setPlayers(synchronizedPlayers);
+      setMatchesHistory(restoredMatches);
+      setMatchState(restoredMatchState);
+
+      lastSavedHashRef.current = computeCanonicalDataHash(synchronizedPlayers, restoredMatches, restoredMatchState);
+      setPendingImportData(null);
+      setBackupToRestoreFromHistory(null);
+      setImportReport({
+        mode: 'Restauration complète',
+        playersImported: synchronizedPlayers.length,
+        playersIgnored: 0,
+        matchesImported: restoredMatches.length,
+        matchesIgnored: 0,
+        details: 'Toutes les données (joueurs, matchs, compositions et statistiques) ont été intégralement restaurées.'
+      });
+      showToast('Restauration complète effectuée avec succès !', 'success');
+    } catch (err) {
+      // Rollback transactionnel : les données initiales restent intactes
+      setPlayers(snapshotPrevPlayers);
+      setMatchesHistory(snapshotPrevMatches);
+      setMatchState(snapshotPrevMatchState);
+      showToast(`Erreur lors de la restauration (données initiales préservées) : ${err.message}`, 'error');
+    }
+  };
+
+  // Application atomique d'une IMPORTATION COMPLÉMENTAIRE (fusion sans écrasement + détection des doublons)
+  const executeComplementaryImport = async (targetEnvelope) => {
+    const snapshotPrevPlayers = [...players];
+    const snapshotPrevMatches = [...matchesHistory];
+
+    try {
+      const check = validateAndAnalyzeBackup(targetEnvelope);
+      if (!check.valid) throw new Error(check.error);
+
+      const incomingPlayers = targetEnvelope.data.players.map(migratePlayer).filter(Boolean);
+      const incomingMatches = Array.isArray(targetEnvelope.data.matchesHistory)
+        ? targetEnvelope.data.matchesHistory
+        : [];
+
+      const existingById = new Map(players.map(p => [p.id, p]));
+      const existingByName = new Map(players.map(p => [p.name.trim().toLowerCase(), p]));
+
+      // Table de correspondance des IDs pour préserver les relations si un doublon de nom avait un autre ID
+      const idRemap = {};
+      const addedPlayers = [];
+      let ignoredPlayersCount = 0;
+
+      incomingPlayers.forEach(incP => {
+        const normName = incP.name.trim().toLowerCase();
+        if (existingById.has(incP.id)) {
+          idRemap[incP.id] = incP.id;
+          ignoredPlayersCount++;
+        } else if (existingByName.has(normName)) {
+          const matchedExisting = existingByName.get(normName);
+          idRemap[incP.id] = matchedExisting.id;
+          ignoredPlayersCount++;
+        } else {
+          idRemap[incP.id] = incP.id;
+          addedPlayers.push(incP);
+          existingById.set(incP.id, incP);
+          existingByName.set(normName, incP);
+        }
+      });
+
+      const mergedPlayersRaw = [...players, ...addedPlayers];
+      const allValidPlayerIds = new Set(mergedPlayersRaw.map(p => p.id));
+
+      // Remappage des incompatibilités sur les joueurs importés
+      const mergedPlayersCleaned = mergedPlayersRaw.map(p => {
+        const remappedInc = (p.incompatibilities || [])
+          .map(oldId => idRemap[oldId] || oldId)
+          .filter(id => allValidPlayerIds.has(id) && id !== p.id);
+        return { ...p, incompatibilities: Array.from(new Set(remappedInc)) };
+      });
+
+      // Détection des doublons de matchs (par ID ou par signature Date + Adversaire + Score)
+      const existingMatchIds = new Set(matchesHistory.map(m => m.id));
+      const existingMatchSignatures = new Set(
+        matchesHistory.map(
+          m => `${String(m.date).slice(0, 10)}_${String(m.opponentName).trim().toLowerCase()}_${m.ourSets}-${m.theirSets}`
+        )
+      );
+
+      const addedMatches = [];
+      let ignoredMatchesCount = 0;
+
+      incomingMatches.forEach(incM => {
+        const sig = `${String(incM.date).slice(0, 10)}_${String(incM.opponentName).trim().toLowerCase()}_${incM.ourSets}-${incM.theirSets}`;
+        if (existingMatchIds.has(incM.id) || existingMatchSignatures.has(sig)) {
+          ignoredMatchesCount++;
+          return;
+        }
+
+        // Remappage des IDs joueurs dans le match importé
+        const remappedPresentIds = Array.from(
+          new Set((incM.presentPlayerIds || []).map(oldId => idRemap[oldId] || oldId).filter(id => allValidPlayerIds.has(id)))
+        );
+        const remappedSetsMap = {};
+        Object.entries(incM.playerSetsMap || {}).forEach(([oldId, setsVal]) => {
+          const targetId = idRemap[oldId] || oldId;
+          if (allValidPlayerIds.has(targetId)) {
+            remappedSetsMap[targetId] = Number(remappedSetsMap[targetId] || 0) + Number(setsVal || 0);
+          }
+        });
+
+        addedMatches.push({
+          ...incM,
+          presentPlayerIds: remappedPresentIds,
+          playerSetsMap: remappedSetsMap
+        });
+        existingMatchIds.add(incM.id);
+        existingMatchSignatures.add(sig);
+      });
+
+      const finalMatches = [...addedMatches, ...matchesHistory].sort(
+        (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+      );
+
+      const finalPlayers = recalculatePlayersStatsFromMatches(mergedPlayersCleaned, finalMatches, true);
+
+      setPlayers(finalPlayers);
+      setMatchesHistory(finalMatches);
+      setPendingImportData(null);
+      setImportReport({
+        mode: 'Importation complémentaire',
+        playersImported: addedPlayers.length,
+        playersIgnored: ignoredPlayersCount,
+        matchesImported: addedMatches.length,
+        matchesIgnored: ignoredMatchesCount,
+        details: `${addedPlayers.length} nouveau(x) joueur(s) et ${addedMatches.length} nouveau(x) match(s) ajoutés. Doublons ignorés : ${ignoredPlayersCount} joueur(s), ${ignoredMatchesCount} match(s).`
+      });
+
+      showToast(
+        `Import terminé : +${addedPlayers.length} joueur(s), +${addedMatches.length} match(s).`,
+        'success'
+      );
+    } catch (err) {
+      setPlayers(snapshotPrevPlayers);
+      setMatchesHistory(snapshotPrevMatches);
+      showToast(`Erreur lors de l'importation complémentaire : ${err.message}`, 'error');
+    }
+  };
+
   const presentPlayers = useMemo(
     () => players.filter(p => matchState.presentIds.includes(p.id)),
     [players, matchState.presentIds]
@@ -574,7 +1400,6 @@ export default function VolleyManagerPro() {
     [presentPlayers]
   );
 
-  // Moyennes offensive et défensive des 6 joueurs sur le terrain (hors Libéro)
   const courtAverages = useMemo(() => {
     const count = matchState.court?.length || 0;
     if (count === 0) return { attackAvg: '0,0', defenseAvg: '0,0' };
@@ -594,14 +1419,7 @@ export default function VolleyManagerPro() {
     };
   }, [matchState.court]);
 
-  const globalTeamStats = useMemo(() => {
-    const totalMatches = matchesHistory.length;
-    const wins = matchesHistory.filter(m => m.ourSets > m.theirSets).length;
-    const losses = totalMatches - wins;
-    const setsWon = matchesHistory.reduce((acc, m) => acc + Number(m.ourSets || 0), 0);
-    const setsLost = matchesHistory.reduce((acc, m) => acc + Number(m.theirSets || 0), 0);
-    return { totalMatches, wins, losses, setsWon, setsLost };
-  }, [matchesHistory]);
+  const globalTeamStats = useMemo(() => computeGlobalTeamStats(matchesHistory), [matchesHistory]);
 
   const eligibleBenchForLibero = useMemo(() => {
     const enteredSet = new Set(matchState.enteredCourtIds || []);
@@ -668,7 +1486,13 @@ export default function VolleyManagerPro() {
     if (target) showToast(`${target.name} supprimé.`, 'info');
   };
 
-  const handleResetSeason = () => {
+  const handleResetSeason = async () => {
+    await performBackup({
+      triggerType: 'pre-restore',
+      label: 'Sauvegarde de sécurité avant Reset Saison',
+      force: true,
+      silent: true
+    });
     setPlayers(players.map(p => ({ ...p, historyMatches: 0, historySets: 0 })));
     setMatchesHistory([]);
     setMatchState(prev => ({
@@ -689,7 +1513,7 @@ export default function VolleyManagerPro() {
       historyRecorded: false
     }));
     setConfirmSeasonResetOpen(false);
-    showToast('Nouvelle saison initialisée : historiques remis à zéro.', 'success');
+    showToast('Nouvelle saison initialisée (une sauvegarde de sécurité a été créée).', 'success');
   };
 
   const handleConfirmDeleteMatch = () => {
@@ -818,11 +1642,6 @@ export default function VolleyManagerPro() {
     showToast(`${candidatePlayer.name} est désormais désigné Libéro pour le match !`, 'success');
   };
 
-  /**
-   * Rotation horaire sur le terrain :
-   * P4 (Av. Gauche) -> P3 (Av. Centre) -> P2 (Av. Droite) -> P1 (Arr. Droite) -> P6 (Arr. Centre) -> P5 (Arr. Gauche) -> P4
-   * Le joueur emporte avec lui son rôle (targetRole, label, matchType).
-   */
   const rotateCourtClockwise = () => {
     if (!matchState.court || matchState.court.length !== 6) return;
     const byPos = {};
@@ -892,7 +1711,6 @@ export default function VolleyManagerPro() {
     }
 
     if (swapSelection.zone === 'court' && zone === 'court') {
-      // Échange de position entre 2 joueurs déjà sur le terrain : chacun conserve son poste
       const slotA = nextCourt[swapSelection.indexOrId];
       const slotB = nextCourt[indexOrId];
       nextCourt[swapSelection.indexOrId] = {
@@ -910,7 +1728,6 @@ export default function VolleyManagerPro() {
         matchType: slotA.matchType
       };
     } else {
-      // Remplacement entre le terrain et le banc : le joueur entrant reprend le poste du joueur sortant
       const assignPlayerToRef = (ref, newPlayer) => {
         if (ref.zone === 'court') {
           const slot = nextCourt[ref.indexOrId];
@@ -1110,7 +1927,6 @@ export default function VolleyManagerPro() {
     setMatchState(prev => ({ ...prev, isScoreboardReversed: !prev.isScoreboardReversed }));
   };
 
-  // Configuration factorisée des côtés Gauche et Droite du Scoreboard
   const ourTeamPanel = {
     isUs: true,
     name: matchState.teamName,
@@ -1142,6 +1958,15 @@ export default function VolleyManagerPro() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex justify-center select-none font-sans">
+      {/* Input fichier caché pour l'importation JSON */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json,application/json"
+        onChange={handleFileImportSelect}
+        className="hidden"
+      />
+
       <div className="w-full max-w-md min-h-screen bg-slate-900 flex flex-col relative shadow-2xl border-x border-slate-800/80">
 
         <header className="sticky top-0 z-30 bg-slate-900/95 backdrop-blur-md border-b border-slate-800 px-4 py-3 flex items-center justify-between">
@@ -1156,21 +1981,29 @@ export default function VolleyManagerPro() {
               <p className="text-[11px] text-slate-400 mt-0.5">
                 {matchState.isActive
                   ? `En cours : Set ${matchState.currentSet} (${matchState.ourSets}-${matchState.theirSets})`
-                  : `${players.length} joueurs • Mode Hors Ligne`}
+                  : `${players.length} joueurs • ${backupsList.length} sauv.`}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-1.5">
-            {matchState.mode === 'Loisir' ? (
-              <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-pink-500/15 text-pink-300 border border-pink-500/30">
-                Mixité Loisir
-              </span>
-            ) : (
-              <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-blue-500/15 text-blue-300 border border-blue-500/30">
-                Classique
-              </span>
-            )}
+            <button
+              onClick={() => setDataManagerModalOpen(true)}
+              className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-semibold text-slate-200 flex items-center gap-1.5 active:scale-95 transition relative"
+              title="Gestion des données & Sauvegardes"
+            >
+              <Database className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Données</span>
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  lastBackupError
+                    ? 'bg-rose-500'
+                    : backupSettings.autoBackupEnabled
+                    ? 'bg-emerald-400'
+                    : 'bg-amber-400'
+                }`}
+              />
+            </button>
           </div>
         </header>
 
@@ -1952,9 +2785,69 @@ export default function VolleyManagerPro() {
             </div>
           )}
 
-          {/* ONGLET 4 : STATISTIQUES & HISTORIQUE */}
+          {/* ONGLET 4 : STATISTIQUES, HISTORIQUE & GESTION DES DONNÉES */}
           {activeTab === 'stats' && (
             <div className="space-y-4">
+              {/* Carte dédiée : Gestion des données & Sauvegardes */}
+              <div className="bg-gradient-to-br from-indigo-950/50 to-slate-900 border border-indigo-500/40 rounded-2xl p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Database className="w-4 h-4 text-indigo-400" />
+                    <h2 className="text-sm font-bold text-white">Gestion des Données & Sauvegardes</h2>
+                  </div>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                      backupSettings.autoBackupEnabled
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                        : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                    }`}
+                  >
+                    {backupSettings.autoBackupEnabled ? 'Auto-Save Actif' : 'Auto-Save Désactivé'}
+                  </span>
+                </div>
+
+                <div className="text-[11px] text-slate-300 space-y-0.5">
+                  <div>
+                    Dernière sauvegarde réussie : <strong className="text-white">{formatDateTimeFr(lastBackupAt)}</strong>
+                  </div>
+                  <div className="text-slate-400">
+                    {backupsList.length} version(s) conservée(s) dans le coffre IndexedDB ({players.length} joueurs, {matchesHistory.length} matchs)
+                  </div>
+                </div>
+
+                {lastBackupError && (
+                  <div className="p-2.5 rounded-xl bg-rose-950/60 border border-rose-500/40 text-[11px] text-rose-200 flex items-start gap-2">
+                    <XCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <span>{lastBackupError}</span>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    onClick={handleManualExportFile}
+                    className="py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-lg shadow-indigo-600/25 active:scale-95 transition"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Exporter (.json)</span>
+                  </button>
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-100 text-xs font-bold flex items-center justify-center gap-1.5 active:scale-95 transition"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Importer / Restaurer</span>
+                  </button>
+                </div>
+
+                <button
+                  onClick={() => setDataManagerModalOpen(true)}
+                  className="w-full py-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 text-[11px] font-semibold text-indigo-300 flex items-center justify-center gap-1.5 active:scale-95 transition"
+                >
+                  <History className="w-3.5 h-3.5" />
+                  <span>Ouvrir l'historique des sauvegardes & paramètres ({backupsList.length})</span>
+                </button>
+              </div>
+
               <div className="bg-slate-800/50 border border-slate-800 rounded-2xl p-4 space-y-3">
                 <h2 className="text-sm font-bold text-white flex items-center gap-2">
                   <Trophy className="w-4 h-4 text-amber-400" />
@@ -2221,6 +3114,343 @@ export default function VolleyManagerPro() {
             })}
           </div>
         </nav>
+
+        {/* MODALE : CENTRE DE GESTION DES DONNÉES, SAUVEGARDES AUTOMATIQUES & RESTAURATION */}
+        {dataManagerModalOpen && (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+            <div className="bg-slate-900 border-t sm:border border-slate-700 rounded-t-3xl sm:rounded-2xl max-w-md w-full max-h-[92vh] overflow-y-auto p-5 space-y-4 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <Database className="w-5 h-5 text-indigo-400" />
+                  <div>
+                    <h3 className="text-base font-bold text-white leading-tight">
+                      Sauvegardes & Restauration
+                    </h3>
+                    <p className="text-[11px] text-slate-400">
+                      Coffre IndexedDB indépendant & Export JSON externe
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setDataManagerModalOpen(false);
+                    setPendingImportData(null);
+                    setBackupToRestoreFromHistory(null);
+                  }}
+                  className="p-1 text-slate-400 hover:text-white"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Compte-rendu d'importation / restauration */}
+              {importReport && (
+                <div className="p-3.5 rounded-2xl bg-emerald-950/50 border border-emerald-500/40 space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between font-bold text-emerald-300">
+                    <span className="flex items-center gap-1.5">
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>Opération réussie : {importReport.mode}</span>
+                    </span>
+                    <button onClick={() => setImportReport(null)} className="text-slate-400">
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-200">{importReport.details}</p>
+                </div>
+              )}
+
+              {/* Panneau de confirmation avant Importation / Restauration d'un fichier sélectionné */}
+              {pendingImportData && (
+                <div className="p-4 rounded-2xl bg-indigo-950/40 border-2 border-indigo-500/60 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-indigo-200 flex items-center gap-1.5">
+                      <FileJson className="w-4 h-4 text-indigo-400" />
+                      <span>Fichier vérifié : {pendingImportData.fileName}</span>
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-bold">
+                      Intégrité OK
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-[11px] bg-slate-900/90 p-2.5 rounded-xl border border-slate-800">
+                    <div>Joueurs contenus : <strong className="text-white">{pendingImportData.validation.summary.playersCount}</strong></div>
+                    <div>Matchs contenus : <strong className="text-white">{pendingImportData.validation.summary.matchesCount}</strong></div>
+                    <div className="col-span-2 text-slate-400">
+                      Créée le : {formatDateTimeFr(pendingImportData.validation.summary.createdAt)} (v{pendingImportData.validation.summary.schemaVersion})
+                    </div>
+                  </div>
+
+                  {pendingImportData.validation.anomalies.length > 0 && (
+                    <div className="p-2.5 rounded-xl bg-amber-950/50 border border-amber-500/40 text-[10px] text-amber-200 space-y-1">
+                      <div className="font-bold">Remarques détectées :</div>
+                      {pendingImportData.validation.anomalies.map((anom, i) => (
+                        <div key={i}>• {anom}</div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="space-y-2 pt-1">
+                    <div className="text-[11px] font-bold text-white">Choisissez le mode d'application :</div>
+
+                    {/* Mode B : Importation complémentaire (sans écrasement) */}
+                    <button
+                      onClick={() => executeComplementaryImport(pendingImportData.envelope)}
+                      className="w-full p-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-left transition active:scale-[0.99]"
+                    >
+                      <div className="text-xs font-bold">1. Importation complémentaire (Recommandé)</div>
+                      <div className="text-[10px] opacity-90 mt-0.5">
+                        Ajoute uniquement les nouveaux joueurs et matchs sans écraser vos données actuelles. Détecte et ignore les doublons.
+                      </div>
+                    </button>
+
+                    {/* Mode A : Restauration complète (remplacement avec sauvegarde de sécurité auto) */}
+                    <div className="p-3 rounded-xl bg-rose-950/40 border border-rose-500/40 space-y-2">
+                      <div className="text-xs font-bold text-rose-200 flex items-center gap-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                        <span>2. Restauration complète (Remplacement total)</span>
+                      </div>
+                      <p className="text-[10px] text-slate-300">
+                        Attention : remplace toutes les données actuelles par celles du fichier. Une sauvegarde de sécurité de vos données actuelles sera créée automatiquement avant l'opération.
+                      </p>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleManualExportFile}
+                          className="flex-1 py-2 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-[10px] font-semibold text-slate-200 border border-slate-700"
+                        >
+                          Télécharger copie actuelle
+                        </button>
+                        <button
+                          onClick={() => executeFullRestore(pendingImportData.envelope, true)}
+                          className="flex-1 py-2 px-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-[10px] font-bold text-white"
+                        >
+                          Confirmer remplacement
+                        </button>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => setPendingImportData(null)}
+                      className="w-full py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold"
+                    >
+                      Annuler
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Actions principales : Exporter / Importer / Sauvegarde immédiate */}
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-300 uppercase tracking-wider block">
+                  Actions manuelles
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={handleManualExportFile}
+                    className="p-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex flex-col items-center gap-1 shadow-lg shadow-indigo-600/25 active:scale-95 transition"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Exporter une sauvegarde</span>
+                    <span className="text-[9px] font-normal opacity-80">Fichier .json complet</span>
+                  </button>
+
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="p-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-xs font-bold flex flex-col items-center gap-1 active:scale-95 transition"
+                  >
+                    <Upload className="w-4 h-4 text-emerald-400" />
+                    <span>Importer un fichier</span>
+                    <span className="text-[9px] font-normal text-slate-400">Restaurer ou fusionner</span>
+                  </button>
+                </div>
+
+                <button
+                  onClick={() =>
+                    performBackup({
+                      triggerType: 'manual',
+                      label: 'Sauvegarde immédiate déclenchée manuellement',
+                      force: true,
+                      silent: false
+                    })
+                  }
+                  disabled={isBackupRunning}
+                  className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-indigo-300 flex items-center justify-center gap-2 active:scale-95 transition"
+                >
+                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                  <span>{isBackupRunning ? 'Sauvegarde en cours...' : 'Lancer une sauvegarde interne immédiate'}</span>
+                </button>
+              </div>
+
+              {/* Paramètres de sauvegarde automatique */}
+              <div className="p-3.5 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-bold text-white">Sauvegarde automatique</div>
+                    <div className="text-[10px] text-slate-400">
+                      Après chaque modification, en arrière-plan et périodiquement
+                    </div>
+                  </div>
+                  <button
+                    onClick={() =>
+                      setBackupSettings(prev => ({
+                        ...prev,
+                        autoBackupEnabled: !prev.autoBackupEnabled
+                      }))
+                    }
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition ${
+                      backupSettings.autoBackupEnabled
+                        ? 'bg-emerald-600/30 border-emerald-500 text-emerald-200'
+                        : 'bg-slate-800 border-slate-700 text-slate-400'
+                    }`}
+                  >
+                    {backupSettings.autoBackupEnabled ? 'Activée' : 'Désactivée'}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800/80 text-[11px]">
+                  <div>
+                    <label className="text-[10px] text-slate-400 block mb-1">Délai regroupement (Debounce)</label>
+                    <select
+                      value={backupSettings.debounceSeconds}
+                      onChange={e =>
+                        setBackupSettings(prev => ({ ...prev, debounceSeconds: Number(e.target.value) }))
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-white"
+                    >
+                      <option value={1.5}>Rapide (1,5 sec)</option>
+                      <option value={2.5}>Standard (2,5 sec)</option>
+                      <option value={5}>Économique (5 sec)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-400 block mb-1">Fréquence périodique</label>
+                    <select
+                      value={backupSettings.periodicHours}
+                      onChange={e =>
+                        setBackupSettings(prev => ({ ...prev, periodicHours: Number(e.target.value) }))
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-white"
+                    >
+                      <option value={6}>Toutes les 6h</option>
+                      <option value={12}>Toutes les 12h</option>
+                      <option value={24}>Quotidienne (24h)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="text-[10px] text-slate-400 pt-1 border-t border-slate-800/60 flex items-center justify-between">
+                  <span>Dernière sauvegarde réussie :</span>
+                  <strong className="text-slate-200">{formatDateTimeFr(lastBackupAt)}</strong>
+                </div>
+              </div>
+
+              {/* Historique des sauvegardes internes (Politique 7 quotidiennes / 4 hebdomadaires / 1 mensuelle) */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                    Historique des sauvegardes ({backupsList.length})
+                  </label>
+                  <span className="text-[10px] text-slate-400">Rétention : 7j / 4 sem. / 1 mois</span>
+                </div>
+
+                {backupToRestoreFromHistory && (
+                  <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/50 space-y-2">
+                    <div className="text-xs font-bold text-rose-200">
+                      Confirmer la restauration du point du {formatDateTimeFr(backupToRestoreFromHistory.createdAt)} ?
+                    </div>
+                    <p className="text-[10px] text-slate-300">
+                      Vos données actuelles seront sauvegardées automatiquement avant de restaurer cette version ({backupToRestoreFromHistory.playersCount} joueurs, {backupToRestoreFromHistory.matchesCount} matchs).
+                    </p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setBackupToRestoreFromHistory(null)}
+                        className="flex-1 py-1.5 rounded-lg bg-slate-800 text-slate-300 text-[11px] font-semibold"
+                      >
+                        Annuler
+                      </button>
+                      <button
+                        onClick={() => executeFullRestore(backupToRestoreFromHistory, true)}
+                        className="flex-1 py-1.5 rounded-lg bg-rose-600 text-white text-[11px] font-bold"
+                      >
+                        Restaurer maintenant
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="max-h-60 overflow-y-auto space-y-2 pr-0.5">
+                  {backupsList.length === 0 ? (
+                    <div className="text-xs text-slate-500 italic py-4 text-center">
+                      Aucune sauvegarde dans l'historique.
+                    </div>
+                  ) : (
+                    backupsList.map(bkp => (
+                      <div
+                        key={bkp.id}
+                        className="p-2.5 rounded-xl bg-slate-950/90 border border-slate-800 flex items-center justify-between gap-2 text-[11px]"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-bold text-white">{formatDateTimeFr(bkp.createdAt)}</span>
+                            <span
+                              className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
+                                bkp.triggerType === 'manual'
+                                  ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                                  : bkp.triggerType === 'pre-restore'
+                                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                  : 'bg-slate-800 text-slate-300'
+                              }`}
+                            >
+                              {bkp.triggerType === 'manual'
+                                ? 'Manuelle'
+                                : bkp.triggerType === 'pre-restore'
+                                ? 'Sécurité'
+                                : 'Automatique'}
+                            </span>
+                            {bkp.retentionTier && (
+                              <span className="text-[9px] text-slate-400">({bkp.retentionTier})</span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-400 mt-0.5 flex items-center gap-2">
+                            <span>{bkp.playersCount} joueurs</span>
+                            <span>•</span>
+                            <span>{bkp.matchesCount} matchs</span>
+                            <span>•</span>
+                            <span className={bkp.status === 'success' ? 'text-emerald-400' : 'text-rose-400'}>
+                              {bkp.status === 'success' ? '✓ Réussie' : '✗ Échouée'}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            onClick={() => triggerJsonFileDownload(bkp)}
+                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
+                            title="Télécharger ce point de sauvegarde en fichier .json"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => setBackupToRestoreFromHistory(bkp)}
+                            className="px-2 py-1.5 rounded-lg bg-indigo-600/25 hover:bg-indigo-600/40 border border-indigo-500/40 text-indigo-200 text-[10px] font-bold"
+                          >
+                            Restaurer
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <button
+                onClick={() => setDataManagerModalOpen(false)}
+                className="w-full py-2.5 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* SCOREBOARD EN MODE PAYSAGE PLEIN ÉCRAN */}
         {isLandscapeFullscreen && (
@@ -2545,7 +3775,7 @@ export default function VolleyManagerPro() {
             <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-sm w-full p-5 space-y-4">
               <h3 className="text-base font-bold text-white">Réinitialiser la saison ?</h3>
               <p className="text-xs text-slate-400">
-                Tous les compteurs de matchs, de sets joués et l'historique des rencontres seront remis à zéro. Vos joueurs et leurs notes d'attaque/défense seront conservés.
+                Tous les compteurs de matchs, de sets joués et l'historique des rencontres seront remis à zéro. Vos joueurs et leurs notes d'attaque/défense seront conservés. Une sauvegarde de sécurité sera créée automatiquement avant l'opération.
               </p>
               <div className="flex gap-2">
                 <button
